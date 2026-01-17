@@ -17,6 +17,9 @@
             border-right: 1px solid #dee2e6;
             position: fixed;
             width: 250px;
+            display: flex;
+            flex-direction: column;
+            /* Garante que o mt-auto funcione */
         }
 
         .main-content {
@@ -33,10 +36,12 @@
         .nav-link:hover,
         .nav-link.active {
             background-color: #e9ecef;
-            color: #007bff;
+            color: #0d6efd;
+            /* Ajustado para azul padrão do Bootstrap */
             border-radius: 5px;
         }
 
+        /* Estilos KPI mantidos caso sejam usados em herança, mas idealmente ficam no dashboard */
         .kpi-card {
             background: white;
             border-left: 4px solid #007bff;
@@ -44,47 +49,49 @@
             border-radius: 8px;
             box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
         }
-
-        .kpi-title {
-            font-size: 0.85rem;
-            color: #6c757d;
-            text-transform: uppercase;
-            font-weight: 700;
-        }
-
-        .kpi-value {
-            font-size: 1.5rem;
-            font-weight: 800;
-            color: #212529;
-            margin-top: 5px;
-        }
     </style>
 </head>
 
 <body>
     <div class="sidebar p-4">
         <h5 class="mb-4">🚛 FiscalMaster</h5>
-        <ul class="nav flex-column">
+
+        <ul class="nav flex-column mb-auto">
             <li class="nav-item">
                 <a href="{% url 'dashboard' %}"
-                    class="nav-link {% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}">📊
-                    Dashboard</a>
+                    class="nav-link {% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}">
+                    📊 Dashboard
+                </a>
             </li>
             <li class="nav-item">
                 <a href="{% url 'upload' %}"
-                    class="nav-link {% if request.resolver_match.url_name == 'upload' %}active{% endif %}">📤 Upload</a>
+                    class="nav-link {% if request.resolver_match.url_name == 'upload' %}active{% endif %}">
+                    📤 Upload
+                </a>
             </li>
             <li class="nav-item">
                 <a href="{% url 'analise' %}"
-                    class="nav-link {% if request.resolver_match.url_name == 'analise' %}active{% endif %}">🔍
-                    Análise</a>
+                    class="nav-link {% if request.resolver_match.url_name == 'analise' %}active{% endif %}">
+                    🔍 Análise
+                </a>
             </li>
         </ul>
+
         <hr>
+
         <div class="mt-auto">
+            {% if user.is_staff %}
+            <div class="mb-3">
+                <a href="/admin/" target="_blank" class="btn btn-outline-secondary btn-sm w-100">
+                    ⚙️ Painel Admin
+                </a>
+            </div>
+            {% endif %}
+
             <div class="d-flex align-items-center px-3 mb-3 text-muted">
                 <small>Usuário: <strong>{{ request.user.username }}</strong></small>
             </div>
+
             <form action="{% url 'logout' %}" method="post">
                 {% csrf_token %}
                 <button type="submit" class="btn btn-outline-danger btn-sm w-100">

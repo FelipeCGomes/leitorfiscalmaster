@@ -1,6 +1,10 @@
 from django.contrib.auth.decorators import login_required
 from django.db import close_old_connections
 from django.shortcuts import render
+from django.http import StreamingHttpResponse
+from django.template.loader import render_to_string
+from django.contrib import messages
+from django.core.cache import cache
 from .models import Nfe, Cte, Item, Log
 from . import parsers, services, utils
 import pandas as pd
@@ -227,11 +231,23 @@ def analise(request):
     # 5. Tabela
     tabela_docs = df_filtered.copy()
     if not tabela_docs.empty:
+        # CÓDIGO ROBUSTO (Com correções para evitar Erro 500):
+        tabela_docs['frete_valor'] = pd.to_numeric(tabela_docs['frete_valor'], errors='coerce').fillna(0)
+        tabela_docs['peso_bruto'] = pd.to_numeric(tabela_docs['peso_bruto'], errors='coerce').fillna(0)
+        
+        if 'peso_cte_total' in tabela_docs.columns:
+            tabela_docs['peso_cte_total'] = pd.to_numeric(tabela_docs['peso_cte_total'], errors='coerce').fillna(0)
+            tabela_docs['peso_cte_fmt'] = tabela_docs['peso_cte_total'].apply(utils.br_weight)
+        else:
+            tabela_docs['peso_cte_fmt'] = "0 kg"
+
+        tabela_docs['valor_nf'] = pd.to_numeric(tabela_docs['valor_nf'], errors='coerce').fillna(0)
+
+        # Formatação Visual
         tabela_docs['frete_fmt'] = tabela_docs['frete_valor'].apply(utils.br_money)
         tabela_docs['peso_fmt'] = tabela_docs['peso_bruto'].apply(utils.br_weight)
-        # Formatação para o novo campo de peso do CTE
-        tabela_docs['peso_cte_fmt'] = tabela_docs['peso_cte_total'].apply(utils.br_weight)
         tabela_docs['valor_nf_fmt'] = tabela_docs['valor_nf'].apply(utils.br_money)
+
         docs_list = tabela_docs.head(1000).to_dict('records')
     else:
         docs_list = []
@@ -281,7 +297,9 @@ def upload_files(request):
         tipo = request.POST.get('tipo') 
         
         def file_processor_generator():
-            yield render_to_string('core/progress.html', {'request': request})
+            # CORREÇÃO CSRF: Passamos 'request=request' para que o render_to_string
+            # tenha acesso ao contexto (inclusive CSRF token)
+            yield render_to_string('core/progress.html', request=request)
             
             total_docs = 0
             for f in files:
@@ -294,7 +312,7 @@ def upload_files(request):
                     total_docs += 1
             
             processed_count = 0
-            BATCH_SIZE = 200  
+            BATCH_SIZE = 2000  # <--- AUMENTADO DE 200 PARA 2000 PARA REDUZIR DB HITS
             
             objs_cte = []; objs_nfe = []; objs_item = []; logs = []
 
@@ -303,7 +321,8 @@ def upload_files(request):
                 except: return None
             
             def save_batch():
-                close_old_connections()
+                # REMOVIDO: close_old_connections() 
+                # Manter a conexão aberta é vital para não estourar o limite de conexões/hora
                 try:
                     if objs_cte:
                         Cte.objects.bulk_create(objs_cte, ignore_conflicts=True)
@@ -317,9 +336,14 @@ def upload_files(request):
                     if logs:
                         Log.objects.bulk_create(logs, ignore_conflicts=True)
                         logs.clear()
+                    
+                    # Limpa o cache do dashboard para forçar atualização
+                    cache.delete('dashboard_df')
+                    
                 except Exception as db_err:
-                    close_old_connections()
                     print(f"Erro no Batch DB: {db_err}")
+                    # Apenas fecha se der erro real para tentar recuperar
+                    close_old_connections()
 
             for f in files:
                 f.seek(0) 

@@ -1,4 +1,5 @@
 import pandas as pd
+from django.core.cache import cache # <--- NOVO IMPORT
 from .models import Nfe, Cte, Item, MemoriaIa
 from .config import CNPJS_CIA, TABELA_ANTT
 from .utils import limpar_cnpj, get_regiao, COORDS_UF
@@ -8,7 +9,12 @@ def get_items_por_nf(chave_nf):
     return pd.DataFrame(qs)
 
 def get_dashboard_data():
-    # 1. Carrega dados do Banco
+    # Verifica cache
+    cached_df = cache.get('dashboard_df')
+    if cached_df is not None:
+        return cached_df
+
+    # 2. Carrega dados do Banco (Se não estiver no cache)
     nf_qs = list(Nfe.objects.all().values())
     cte_qs = list(Cte.objects.all().values())
     
@@ -69,8 +75,6 @@ def get_dashboard_data():
 
         df_c_calc['frete_rateado'] = df_c_calc.apply(calcular_parcela, axis=1)
         df_c_calc['pedagio_rateado'] = df_c_calc['pedagio_valor']
-
-        # --- AQUI ESTAVA O ERRO: Substituímos o apply complexo por lógica simples ---
         
         # 1. Separa CTEs Normais e Complementares
         df_c_calc['is_complementar'] = df_c_calc['tp_cte'] == '1'
@@ -171,5 +175,7 @@ def get_dashboard_data():
 
     df['Emitente_Legivel'] = df.apply(lambda x: traduzir_empresa(x, 'emitente', 'cnpj_emit'), axis=1)
     df['Destinatario_Legivel'] = df.apply(lambda x: traduzir_empresa(x, 'destinatario', 'cnpj_dest'), axis=1)
-
+    
+    # 3. Salva no Cache por 1 hora (3600 segundos)
+    cache.set('dashboard_df', df, 3600) # Salva por 1 hora
     return df

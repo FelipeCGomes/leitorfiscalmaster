@@ -67,36 +67,90 @@
 <div class="card p-3 mb-4 border-0 shadow-sm bg-light">
     <form method="get" action="{% url 'analise' %}">
         <div class="row g-2 mb-2">
-            <div class="col-md-1"><label class="filter-label">Ano</label><select name="ano" multiple
-                    placeholder="Ano">{% for x in opts.ano %}<option value="{{ x }}" {% if x|stringformat:"s" in sel.ano
-                        %}selected{% endif %}>{{ x }}</option>{% endfor %}</select></div>
-            <div class="col-md-1"><label class="filter-label">Mês</label><select name="mes" multiple
-                    placeholder="Mês">{% for x in opts.mes %}<option value="{{ x }}" {% if x|stringformat:"s" in sel.mes
-                        %}selected{% endif %}>{{ x }}</option>{% endfor %}</select></div>
-            <div class="col-md-1"><label class="filter-label">Dia</label><select name="dia" multiple
-                    placeholder="Dia">{% for x in opts.dia %}<option value="{{ x }}" {% if x|stringformat:"s" in sel.dia
-                        %}selected{% endif %}>{{ x }}</option>{% endfor %}</select></div>
-            <div class="col-md-2"><label class="filter-label">Filial (Origem)</label><select name="filial" multiple
-                    placeholder="Selecione...">{% for x in opts.filial %}<option value="{{ x }}" {% if x in sel.filial
-                        %}selected{% endif %}>{{ x }}</option>{% endfor %}</select></div>
-            <div class="col-md-2"><label class="filter-label">Cliente (Destino)</label><select name="cliente" multiple
-                    placeholder="Selecione...">{% for x in opts.cliente %}<option value="{{ x }}" {% if x in sel.cliente
-                        %}selected{% endif %}>{{ x }}</option>{% endfor %}</select></div>
-            <div class="col-md-2"><label class="filter-label">Transp.</label><select name="transp" multiple
-                    placeholder="Selecione...">{% for x in opts.transp %}<option value="{{ x }}" {% if x in sel.transp
-                        %}selected{% endif %}>{{ x }}</option>{% endfor %}</select></div>
-            <div class="col-md-1"><label class="filter-label">Modo</label><select name="mod_frete" multiple
-                    placeholder="Tipo">{% for x in opts.mod %}<option value="{{ x }}" {% if x in sel.mod %}selected{%
-                        endif %}>{{ x }}</option>{% endfor %}</select></div>
-            <div class="col-md-2"><label class="filter-label">Operação</label><select name="tipo_op" multiple
-                    placeholder="Operação">{% for x in opts.tipo %}<option value="{{ x }}" {% if x in sel.tipo
-                        %}selected{% endif %}>{{ x }}</option>{% endfor %}</select></div>
+            <div class="col-md-1">
+                <label class="filter-label">Ano</label>
+                <select name="ano" multiple placeholder="Ano">
+                    {% for x in opts.ano %}
+                    <option value="{{ x }}" {% if x|stringformat:"s" in sel.ano %}selected{% endif %}>{{ x }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-md-1">
+                <label class="filter-label">Mês</label>
+                <select name="mes" multiple placeholder="Mês">
+                    {% for x in opts.mes %}
+                    <option value="{{ x }}" {% if x|stringformat:"s" in sel.mes %}selected{% endif %}>{{ x }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-md-1">
+                <label class="filter-label">Dia</label>
+                <select name="dia" multiple placeholder="Dia">
+                    {% for x in opts.dia %}
+                    <option value="{{ x }}" {% if x|stringformat:"s" in sel.dia %}selected{% endif %}>{{ x }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-md-2">
+                <label class="filter-label">Filial (Origem)</label>
+                <select name="filial" multiple placeholder="Selecione...">
+                    {% for x in opts.filial %}
+                    <option value="{{ x }}" {% if x in sel.filial %}selected{% endif %}>{{ x }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-md-2">
+                <label class="filter-label">Cliente (Destino)</label>
+                <select name="cliente" multiple placeholder="Selecione...">
+                    {% for x in opts.cliente %}
+                    <option value="{{ x }}" {% if x in sel.cliente %}selected{% endif %}>{{ x }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-md-2">
+                <label class="filter-label">Transp.</label>
+                <select name="transp" multiple placeholder="Selecione...">
+                    {% for x in opts.transp %}
+                    <option value="{{ x }}" {% if x in sel.transp %}selected{% endif %}>{{ x }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-md-1">
+                <label class="filter-label">Modo</label>
+                <select name="mod_frete" multiple placeholder="Tipo">
+                    {% for x in opts.mod %}
+                    <option value="{{ x }}" {% if x in sel.mod %}selected{% endif %}>{{ x }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+
+            <div class="col-md-2">
+                <label class="filter-label">Operação</label>
+                <select name="tipo_op" multiple placeholder="Operação">
+                    {% for x in opts.tipo %}
+                    <option value="{{ x }}" {% if x in sel.tipo %}selected{% endif %}>{{ x }}</option>
+                    {% endfor %}
+                </select>
+            </div>
         </div>
+
         <div class="row g-2 align-items-end">
-            <div class="col-md-2"><label class="filter-label">NF-e (Busca)</label><input type="text" name="numero_nf"
-                    class="form-control form-control-sm" value="{{ sel.val_nf }}" placeholder="Digite..."></div>
-            <div class="col-md-2"><label class="filter-label">CT-e (Busca)</label><input type="text" name="numero_cte"
-                    class="form-control form-control-sm" value="{{ sel.val_cte }}" placeholder="Digite..."></div>
+            <div class="col-md-2">
+                <label class="filter-label">NF-e (Busca)</label>
+                <input type="text" name="numero_nf" class="form-control form-control-sm" value="{{ sel.val_nf }}"
+                    placeholder="Digite...">
+            </div>
+            <div class="col-md-2">
+                <label class="filter-label">CT-e (Busca)</label>
+                <input type="text" name="numero_cte" class="form-control form-control-sm" value="{{ sel.val_cte }}"
+                    placeholder="Digite...">
+            </div>
             <div class="col-md-8 d-flex justify-content-end gap-2">
                 <a href="{% url 'analise' %}" class="btn btn-outline-secondary btn-sm">Limpar</a>
                 <button type="submit" class="btn btn-primary btn-sm px-4">Aplicar</button>
