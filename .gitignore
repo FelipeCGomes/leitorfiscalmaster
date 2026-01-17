@@ -1,0 +1,16 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Django
+db.sqlite3
+*.log
+
+# Ambiente
+.env
+
+# IDE
+.vscode/
+.idea/

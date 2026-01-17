@@ -1,0 +1,54 @@
+{% extends 'core/base.html' %}
+
+{% block content %}
+<div class="container mt-5">
+    <div class="card shadow-sm">
+        <div class="card-body text-center p-5">
+            <h3 class="mb-4">Processando Arquivos... ⏳</h3>
+            
+            <div class="progress mb-3" style="height: 30px;">
+                <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated bg-primary" 
+                     role="progressbar" style="width: 0%;">
+                    0%
+                </div>
+            </div>
+            
+            <p id="progressText" class="text-muted fw-bold fs-5">Iniciando...</p>
+            
+            <div id="logArea" class="text-start mt-4 p-3 bg-light border rounded" style="height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; display: none;">
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Função chamada pelo servidor via Streaming
+    function updateProgress(current, total, percent) {
+        const bar = document.getElementById('progressBar');
+        const txt = document.getElementById('progressText');
+        
+        bar.style.width = percent + '%';
+        bar.innerText = percent + '%';
+        txt.innerText = `${current} de ${total} processados (${percent}%)`;
+    }
+
+    function addLog(msg) {
+        const area = document.getElementById('logArea');
+        area.style.display = 'block';
+        area.innerHTML += `<div>${msg}</div>`;
+        area.scrollTop = area.scrollHeight;
+    }
+
+    function finishProcess(redirectUrl, msg) {
+        const bar = document.getElementById('progressBar');
+        bar.classList.remove('progress-bar-animated');
+        bar.classList.add('bg-success');
+        bar.innerText = 'CONCLUÍDO!';
+        document.getElementById('progressText').innerText = msg;
+        
+        setTimeout(() => {
+            window.location.href = redirectUrl;
+        }, 2000); // Espera 2 segundos e volta para o upload
+    }
+</script>
+{% endblock %}

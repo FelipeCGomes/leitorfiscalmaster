@@ -1,0 +1,10 @@
+Django>=5.0
+pymysql
+cryptography
+pandas
+plotly
+lxml
+python-dotenv
+gunicorn
+whitenoise
+dj-database-url

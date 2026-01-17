@@ -1,0 +1,50 @@
+{% extends 'core/base.html' %}
+
+{% block content %}
+<h2 class="mb-4">Upload de Arquivos</h2>
+<p class="text-muted mb-4">Suporta arquivos .XML individuais ou arquivos .ZIP contendo XMLs.</p>
+
+<div class="row">
+    <div class="col-md-6 mb-4">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-primary text-white">
+                <h5 class="m-0">📦 CT-e (Conhecimento de Transporte)</h5>
+            </div>
+            <div class="card-body p-4">
+                <form method="post" enctype="multipart/form-data">
+                    {% csrf_token %}
+                    <input type="hidden" name="tipo" value="cte">
+                    <div class="mb-3">
+                        <label class="form-label">Selecione arquivos XML ou ZIP</label>
+                        <input type="file" name="files" multiple class="form-control" accept=".xml,.zip" required>
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100">
+                        Processar CT-e
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-6 mb-4">
+        <div class="card border-0 shadow-sm h-100">
+            <div class="card-header bg-success text-white">
+                <h5 class="m-0">📄 NF-e (Nota Fiscal)</h5>
+            </div>
+            <div class="card-body p-4">
+                <form method="post" enctype="multipart/form-data">
+                    {% csrf_token %}
+                    <input type="hidden" name="tipo" value="nfe">
+                    <div class="mb-3">
+                        <label class="form-label">Selecione arquivos XML ou ZIP</label>
+                        <input type="file" name="files" multiple class="form-control" accept=".xml,.zip" required>
+                    </div>
+                    <button type="submit" class="btn btn-success w-100">
+                        Processar NF-e
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
