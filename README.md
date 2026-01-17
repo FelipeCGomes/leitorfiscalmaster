@@ -38,3 +38,4 @@ Logue com o usuário e senha que criou.
 Verifique se as tabelas (Nfes, Ctes, Items) aparecem lá.
 
 Vá para http://127.0.0.1:8000/upload/ e teste o upload.
+# leitorfiscalmaster
