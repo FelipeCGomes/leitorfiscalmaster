@@ -5,10 +5,12 @@ from django.http import StreamingHttpResponse
 from django.template.loader import render_to_string
 from django.contrib import messages
 from django.core.cache import cache
-from .models import Nfe, Cte, Item, Log
+from .models import Nfe, Cte, Item, Log, Cliente, ProdutoMap
 from . import parsers, services, utils
 import pandas as pd
 import zipfile
+import threading
+import time
 from datetime import datetime
 import plotly.express as px
 
@@ -81,12 +83,33 @@ def dashboard(request):
     layout_common = {'template': 'plotly_white', 'margin': dict(l=10, r=10, t=30, b=10), 'height': 300}
     config_plot = {'displayModeBar': True, 'scrollZoom': True, 'responsive': True}
 
-    # Mapa
-    agg_map = df_filtered.groupby('UF_Dest').agg({
-        'peso_bruto': 'sum', 'frete_valor': 'sum', 'valor_nf': 'sum', 
-        'pedagio_valor': 'sum', 'chave_nf': 'count'
+    # ==============================================================================
+    # MAPA INTELIGENTE
+    # ==============================================================================
+    df_map = df_filtered.copy()
+
+    def get_lat_fallback(row):
+        if pd.notnull(row.get('latitude')) and row.get('latitude') != 0: 
+            return row['latitude']
+        return utils.COORDS_UF.get(row['UF_Dest'], (0,0))[0]
+
+    def get_lon_fallback(row):
+        if pd.notnull(row.get('longitude')) and row.get('longitude') != 0: 
+            return row['longitude']
+        return utils.COORDS_UF.get(row['UF_Dest'], (0,0))[1]
+
+    df_map['lat_final'] = df_map.apply(get_lat_fallback, axis=1)
+    df_map['lon_final'] = df_map.apply(get_lon_fallback, axis=1)
+
+    agg_map = df_map.groupby(['lat_final', 'lon_final', 'cidade_destino', 'UF_Dest']).agg({
+        'peso_bruto': 'sum', 
+        'frete_valor': 'sum', 
+        'valor_nf': 'sum', 
+        'pedagio_valor': 'sum', 
+        'chave_nf': 'count',
+        'distancia_km': 'mean'
     }).reset_index()
-    
+
     agg_map['custo_ton'] = agg_map.apply(lambda x: x['frete_valor'] / (x['peso_bruto']/1000) if x['peso_bruto']>0 else 0, axis=1)
     agg_map['perc_frete'] = agg_map.apply(lambda x: (x['frete_valor'] / x['valor_nf'] * 100) if x['valor_nf']>0 else 0, axis=1)
     agg_map['txt_peso'] = agg_map['peso_bruto'].apply(utils.br_weight)
@@ -94,20 +117,31 @@ def dashboard(request):
     agg_map['txt_pedagio'] = agg_map['pedagio_valor'].apply(utils.br_money)
     agg_map['txt_ton'] = agg_map['custo_ton'].apply(lambda x: f"R$ {x:,.2f}".replace('.',','))
     agg_map['txt_perc'] = agg_map['perc_frete'].apply(lambda x: f"{x:,.2f}%".replace('.',','))
-    agg_map['lat'] = agg_map['UF_Dest'].apply(lambda x: utils.COORDS_UF.get(x, (0,0))[0])
-    agg_map['lon'] = agg_map['UF_Dest'].apply(lambda x: utils.COORDS_UF.get(x, (0,0))[1])
+    agg_map['txt_dist'] = agg_map['distancia_km'].apply(lambda x: f"{x:,.1f} km".replace('.',','))
+
+    agg_map = agg_map[(agg_map['lat_final'] != 0) & (agg_map['lon_final'] != 0)]
+
+    center_lat = agg_map['lat_final'].mean() if not agg_map.empty else -15.79
+    center_lon = agg_map['lon_final'].mean() if not agg_map.empty else -47.89
     
-    center_lat = agg_map['lat'].mean() if not agg_map.empty else -15
-    center_lon = agg_map['lon'].mean() if not agg_map.empty else -55
-    start_zoom = 4.5 if not agg_map.empty and len(agg_map) <= 3 else 3
+    start_zoom = 4
+    if not agg_map.empty:
+        lat_span = agg_map['lat_final'].max() - agg_map['lat_final'].min()
+        if lat_span < 2: start_zoom = 9
+        elif lat_span < 10: start_zoom = 6
 
     fig_map = px.scatter_mapbox(
-        agg_map, lat='lat', lon='lon', size='peso_bruto', color='frete_valor',
-        hover_name='UF_Dest',
-        hover_data={'lat': False, 'lon': False, 'peso_bruto': False, 'frete_valor': False, 'chave_nf': True, 'txt_peso': True, 'txt_frete': True, 'txt_ton': True, 'txt_perc': True, 'txt_pedagio': True},
-        labels={'chave_nf': 'Qtd NFs', 'txt_peso': 'Peso Bruto', 'txt_frete': 'Valor Frete', 'txt_ton': 'Custo/Ton', 'txt_perc': 'Frete %', 'txt_pedagio': 'Pedágio'},
+        agg_map, 
+        lat='lat_final', lon='lon_final', size='peso_bruto', color='frete_valor',
+        hover_name='cidade_destino',
+        hover_data={
+            'lat_final': False, 'lon_final': False, 'peso_bruto': False, 'frete_valor': False, 
+            'chave_nf': True, 'txt_peso': True, 'txt_frete': True, 
+            'txt_ton': True, 'txt_perc': True, 'txt_pedagio': True, 'txt_dist': True
+        },
+        labels={'chave_nf': 'Qtd NFs', 'txt_peso': 'Peso Bruto', 'txt_frete': 'Valor Frete', 'txt_ton': 'Custo/Ton', 'txt_perc': 'Frete %', 'txt_pedagio': 'Pedágio', 'txt_dist': 'Distância'},
         zoom=start_zoom, center=dict(lat=center_lat, lon=center_lon),
-        mapbox_style="carto-positron", title="Mapa Analítico (Use Zoom/Scroll)"
+        mapbox_style="carto-positron", title="Mapa de Distribuição (Localização Real)"
     )
     fig_map.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=400)
 
@@ -231,7 +265,6 @@ def analise(request):
     # 5. Tabela
     tabela_docs = df_filtered.copy()
     if not tabela_docs.empty:
-        # CÓDIGO ROBUSTO (Com correções para evitar Erro 500):
         tabela_docs['frete_valor'] = pd.to_numeric(tabela_docs['frete_valor'], errors='coerce').fillna(0)
         tabela_docs['peso_bruto'] = pd.to_numeric(tabela_docs['peso_bruto'], errors='coerce').fillna(0)
         
@@ -243,7 +276,6 @@ def analise(request):
 
         tabela_docs['valor_nf'] = pd.to_numeric(tabela_docs['valor_nf'], errors='coerce').fillna(0)
 
-        # Formatação Visual
         tabela_docs['frete_fmt'] = tabela_docs['frete_valor'].apply(utils.br_money)
         tabela_docs['peso_fmt'] = tabela_docs['peso_bruto'].apply(utils.br_weight)
         tabela_docs['valor_nf_fmt'] = tabela_docs['valor_nf'].apply(utils.br_money)
@@ -252,19 +284,43 @@ def analise(request):
     else:
         docs_list = []
 
-    # 6. Drill-down
+    # 6. Drill-down (CORRIGIDO E BLINDADO)
     selected_nf = request.GET.get('selected_nf')
     detalhes = {}
     if selected_nf:
-        df_items = services.get_items_por_nf(selected_nf)
-        if not df_items.empty:
-            df_items['vl_total_fmt'] = df_items['vl_total'].apply(lambda x: utils.br_money(float(x)))
-            df_items['qtd_fmt'] = df_items['qtd_display']
-            detalhes['itens'] = df_items.to_dict('records')
-            detalhes['numero_nf'] = df_items.iloc[0]['numero_nf']
-        else:
-            detalhes['msg'] = "Nenhum item encontrado."
+        selected_nf = str(selected_nf).strip()
+        if selected_nf:
+            df_items = services.get_items_por_nf(selected_nf)
+            if not df_items.empty:
+                # Formatação de Valores
+                df_items['vl_total_fmt'] = df_items['vl_total'].apply(lambda x: utils.br_money(float(x)))
+                
+                # --- BLINDAGEM VISUAL: Usa novos campos se existirem, senão usa antigos ---
+                
+                # Qtd Formatada (ex: "5 CX")
+                if 'qtd_formatada' in df_items.columns:
+                    # fillna com qtd_display para garantir que não fique vazio
+                    df_items['qtd_fmt'] = df_items['qtd_formatada'].fillna(df_items.get('qtd_display', ''))
+                else:
+                    df_items['qtd_fmt'] = df_items.get('qtd_display', '')
 
+                # Peso Estimado (ex: "21,00 kg")
+                if 'peso_estimado_total' in df_items.columns:
+                    def fmt_peso(x):
+                        try: return f"{float(x):.2f} kg".replace('.',',')
+                        except: return "-"
+                    df_items['peso_total_fmt'] = df_items['peso_estimado_total'].apply(fmt_peso)
+                else:
+                    df_items['peso_total_fmt'] = "-"
+                
+                detalhes['itens'] = df_items.to_dict('records')
+                try:
+                    detalhes['numero_nf'] = df_items.iloc[0]['numero_nf']
+                except:
+                    detalhes['numero_nf'] = selected_nf
+            else:
+                detalhes['msg'] = "Nenhum item encontrado para esta NF."
+    
     opts = {
         'ano': sorted(df['Ano'].unique(), reverse=True),
         'mes': sorted(df['Mes'].unique()),
@@ -285,8 +341,41 @@ def analise(request):
     return render(request, 'core/analise.html', context)
 
 # ==============================================================================
-# 3. UPLOAD DE ARQUIVOS
+# 3. UPLOAD DE ARQUIVOS (OTIMIZADO)
 # ==============================================================================
+
+# Função que roda em SEGUNDO PLANO (Background)
+def background_geo_worker():
+    time.sleep(5)
+    print(">>> Iniciando Worker de Geolocalização em Segundo Plano...")
+    
+    pendentes = Cliente.objects.filter(latitude__isnull=True)
+    total = pendentes.count()
+    
+    if total == 0:
+        print(">>> Nenhum cliente pendente de geolocalização.")
+        return
+
+    for i, cliente in enumerate(pendentes):
+        try:
+            dados_mock = {
+                'cnpj_dest': cliente.cpf_cnpj,
+                'destinatario': cliente.nome,
+                'cidade_destino': cliente.cidade,
+                'uf_dest': cliente.uf,
+                'endereco': cliente.endereco,
+                'bairro': cliente.bairro,
+                'cep': cliente.cep
+            }
+            services.cadastrar_ou_atualizar_cliente(dados_mock, buscar_geo=True)
+            time.sleep(1.2)
+            if i % 10 == 0:
+                close_old_connections()
+        except Exception as e:
+            print(f"Erro no Worker Geo ({cliente.nome}): {e}")
+
+    print(">>> Worker de Geolocalização Finalizado!")
+
 @login_required
 def upload_files(request):
     if request.method == 'GET':
@@ -297,8 +386,6 @@ def upload_files(request):
         tipo = request.POST.get('tipo') 
         
         def file_processor_generator():
-            # CORREÇÃO CSRF: Passamos 'request=request' para que o render_to_string
-            # tenha acesso ao contexto (inclusive CSRF token)
             yield render_to_string('core/progress.html', request=request)
             
             total_docs = 0
@@ -312,7 +399,7 @@ def upload_files(request):
                     total_docs += 1
             
             processed_count = 0
-            BATCH_SIZE = 2000  # <--- AUMENTADO DE 200 PARA 2000 PARA REDUZIR DB HITS
+            BATCH_SIZE = 2000 
             
             objs_cte = []; objs_nfe = []; objs_item = []; logs = []
 
@@ -321,28 +408,14 @@ def upload_files(request):
                 except: return None
             
             def save_batch():
-                # REMOVIDO: close_old_connections() 
-                # Manter a conexão aberta é vital para não estourar o limite de conexões/hora
                 try:
-                    if objs_cte:
-                        Cte.objects.bulk_create(objs_cte, ignore_conflicts=True)
-                        objs_cte.clear()
-                    if objs_nfe:
-                        Nfe.objects.bulk_create(objs_nfe, ignore_conflicts=True)
-                        objs_nfe.clear()
-                    if objs_item:
-                        Item.objects.bulk_create(objs_item, ignore_conflicts=True, batch_size=500)
-                        objs_item.clear()
-                    if logs:
-                        Log.objects.bulk_create(logs, ignore_conflicts=True)
-                        logs.clear()
-                    
-                    # Limpa o cache do dashboard para forçar atualização
+                    if objs_cte: Cte.objects.bulk_create(objs_cte, ignore_conflicts=True); objs_cte.clear()
+                    if objs_nfe: Nfe.objects.bulk_create(objs_nfe, ignore_conflicts=True); objs_nfe.clear()
+                    if objs_item: Item.objects.bulk_create(objs_item, ignore_conflicts=True, batch_size=500); objs_item.clear()
+                    if logs: Log.objects.bulk_create(logs, ignore_conflicts=True); logs.clear()
                     cache.delete('dashboard_df')
-                    
                 except Exception as db_err:
                     print(f"Erro no Batch DB: {db_err}")
-                    # Apenas fecha se der erro real para tentar recuperar
                     close_old_connections()
 
             for f in files:
@@ -359,18 +432,14 @@ def upload_files(request):
                                 percent = int((processed_count / total_docs) * 100) if total_docs > 0 else 0
                                 yield f'<script>updateProgress({processed_count}, {total_docs}, {percent});</script>'
                                 
-                                if len(objs_nfe) >= BATCH_SIZE or len(objs_cte) >= BATCH_SIZE:
-                                    save_batch()
+                                if len(objs_nfe) >= BATCH_SIZE or len(objs_cte) >= BATCH_SIZE: save_batch()
                     else:
                         content = f.read()
                         process_content(content, f.name, tipo, objs_cte, objs_nfe, objs_item, logs, parse_date)
-                        
                         processed_count += 1
                         percent = int((processed_count / total_docs) * 100) if total_docs > 0 else 0
                         yield f'<script>updateProgress({processed_count}, {total_docs}, {percent});</script>'
-
-                        if len(objs_nfe) >= BATCH_SIZE or len(objs_cte) >= BATCH_SIZE:
-                            save_batch()
+                        if len(objs_nfe) >= BATCH_SIZE or len(objs_cte) >= BATCH_SIZE: save_batch()
                         
                 except Exception as e:
                     logs.append(Log(arquivo=f.name, tipo_doc=tipo, status='ERRO', mensagem=str(e)))
@@ -379,7 +448,12 @@ def upload_files(request):
             yield '<script>addLog("Gravando dados finais...");</script>'
             save_batch()
             
-            msg = f"Sucesso! {processed_count} documentos processados."
+            geo_thread = threading.Thread(target=background_geo_worker)
+            geo_thread.daemon = True 
+            geo_thread.start()
+            yield '<script>addLog("Iniciando geolocalização em segundo plano...");</script>'
+
+            msg = f"Sucesso! {processed_count} documentos processados. A geolocalização continuará em segundo plano."
             messages.success(request, msg)
             yield f"<script>finishProcess('{request.path}', '{msg}');</script>"
 
@@ -399,10 +473,13 @@ def process_content(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, p
                         peso_kg=r['peso_kg'], numero_nf_cte=r['numero_nf_cte'], cidade_origem=r['cidade_origem'],
                         cidade_destino=r['cidade_destino'], pedagio_valor=r['pedagio_valor'], tp_cte=r['tp_cte'], arquivo=fname
                     ))
+
         elif tipo == 'nfe':
             header, err = parsers.parse_nfe_header(content, fname)
             if err: logs.append(Log(arquivo=fname, tipo_doc='NF-e', status='ERRO', mensagem=err))
             else:
+                services.cadastrar_ou_atualizar_cliente(header, buscar_geo=False)
+
                 objs_nfe.append(Nfe(
                     chave_nf=header['chave_nf'], data=parse_date(header['data']), numero_nf=header['numero_nf'],
                     emitente=header['emitente'], destinatario=header['destinatario'], cnpj_emit=header['cnpj_emit'],
@@ -411,12 +488,28 @@ def process_content(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, p
                     cidade_destino=header['cidade_destino'], mod_frete=header['mod_frete'], cfop_predominante=header['cfop_predominante'],
                     tipo_operacao=header['tipo_operacao'], qtd_itens=header['qtd_itens'], arquivo=fname
                 ))
+                
                 items, _ = parsers.parse_nfe_items(content, fname)
+                
                 for i in items:
+                    peso_unitario_real = services.obter_peso_produto(i['produto'])
+                    qtd = float(i['qtd_float'])
+                    peso_total_item = peso_unitario_real * qtd
+                    
+                    str_peso_unitario = utils.br_weight(peso_unitario_real)
+                    qtd_fmt_num = f"{int(qtd)}" if qtd.is_integer() else f"{qtd:g}".replace('.', ',')
+                    str_qtd_comercial = f"{qtd_fmt_num} {i['unidade']}"
+
                     objs_item.append(Item(
                         chave_nf=i['chave_nf'], numero_nf=i['numero_nf'], emitente=i['emitente'], item_num=i['item_num'],
-                        produto=i['produto'], ncm=i['ncm'], cfop=i['cfop'], unidade=i['unidade'], qtd_display=i['qtd_display'],
-                        qtd_float=i['qtd_float'], vl_total=i['vl_total'], arquivo=fname
+                        produto=i['produto'], ncm=i['ncm'], cfop=i['cfop'], unidade=i['unidade'], 
+                        
+                        qtd_display=str_peso_unitario,   # Visual: Peso Unitário
+                        qtd_formatada=str_qtd_comercial, # Visual: Quantidade Comercial
+                        
+                        qtd_float=i['qtd_float'], vl_total=i['vl_total'], 
+                        peso_estimado_total=peso_total_item, 
+                        arquivo=fname
                     ))
     except Exception as e:
         logs.append(Log(arquivo=fname, tipo_doc=tipo, status='ERRO FATAL', mensagem=str(e)))
