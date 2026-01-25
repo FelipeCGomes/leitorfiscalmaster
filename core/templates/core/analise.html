@@ -209,6 +209,9 @@
         <button onclick="closeDetails()" class="btn btn-sm btn-light py-0">Fechar</button>
     </div>
     <div class="card-body p-0">
+        {% if detalhes.msg %}
+        <div class="alert alert-warning m-3">{{ detalhes.msg }}</div>
+        {% else %}
         <div class="table-responsive">
             <table class="table table-sm table-striped mb-0">
                 <thead class="table-light">
@@ -235,6 +238,7 @@
                 </tbody>
             </table>
         </div>
+        {% endif %}
     </div>
 </div>
 {% endif %}
@@ -261,7 +265,7 @@
             </thead>
             <tbody>
                 {% for doc in docs %}
-                <tr onclick="selectNF('{{ doc.chave_nf }}')">
+                <tr onclick="selectNF('{{ doc.chave_nf }}')" style="cursor: pointer;" title="Clique para ver os itens">
                     <td>{{ doc.data|date:"d/m/Y" }}</td>
                     <td>{{ doc.numero_cte|default:"-" }}</td>
                     <td>{{ doc.cte_complementar|default:"-" }}</td>

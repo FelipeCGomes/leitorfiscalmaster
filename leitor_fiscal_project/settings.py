@@ -91,3 +91,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 LOGIN_URL = 'login'              # Se não estiver logado, vai pra cá
 LOGIN_REDIRECT_URL = 'dashboard' # Se logar com sucesso, vai pra cá
 LOGOUT_REDIRECT_URL = 'login'    # Se deslogar, volta pra cá
+
+# Aumenta o limite de campos no POST (Padrão é 1000)
+# Necessário para selecionar muitos itens no Admin e exportar/deletar
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 50000

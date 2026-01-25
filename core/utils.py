@@ -1,9 +1,13 @@
 import re
 import time
 import requests
+from unicodedata import normalize
 
-# Coordenadas da SUA empresa (Origem Padrão para cálculo de rotas)
-# IMPORTANTE: Altere para a Latitude/Longitude do seu Centro de Distribuição
+# ==============================================================================
+# CONFIGURAÇÕES GERAIS
+# ==============================================================================
+
+# Coordenadas do SEU Centro de Distribuição (Ponto A)
 ORIGEM_PADRAO = {'lat': -15.7975, 'lon': -47.8919} 
 
 COORDS_UF = {
@@ -15,6 +19,10 @@ COORDS_UF = {
     'RO': (-11.22, -62.80), 'RR': (1.99, -61.33), 'RS': (-30.01, -51.22), 'SC': (-27.33, -49.44),
     'SE': (-10.90, -37.07), 'SP': (-23.55, -46.64), 'TO': (-10.25, -48.25)
 }
+
+# ==============================================================================
+# FUNÇÕES DE FORMATAÇÃO
+# ==============================================================================
 
 def get_regiao(uf):
     uf = str(uf).upper().strip()
@@ -33,132 +41,155 @@ def xml_float(t):
 
 def br_money(v):
     if v is None: v = 0.0
-    # Formato R$ 1.500.000,00
     return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def br_weight(kg):
     if kg is None: kg = 0.0
     val = float(kg)
     if val < 1000:
-        # Se for menor que 1000kg, mostra em kg (ex: 999 kg)
         return f"{val:,.0f} kg".replace(",", ".")
     else:
-        # Se for maior, mostra em Toneladas (ex: 8.846 Tons)
         tons = val / 1000
         return f"{tons:,.3f} Tons".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def br_num(v):
     if v is None: v = 0
-    # Formato 1.000 (inteiro) ou 1.000,00 (decimal)
     if isinstance(v, int):
         return f"{v:,.0f}".replace(",", ".")
     return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-def get_lat_lon(endereco, bairro, cidade, uf, cep):
+def limpar_texto_endereco(texto):
     """
-    Busca coordenadas usando Nominatim (OpenStreetMap).
-    Lógica especial para DF.
+    Remove complementos e sujeira que confundem a API de Geolocalização.
     """
-    base_url = "https://nominatim.openstreetmap.org/search"
-    headers = {'User-Agent': 'LeitorFiscalMaster/1.0'} # Obrigatório identificar o app
-    
-    # Lógica de Query
-    query = ""
-    
-    if str(uf).upper() == 'DF':
-        # No DF, cidade é "Brasília", focamos no Bairro ou CEP
-        if bairro:
-            query = f"{bairro}, Brasília, DF, Brazil"
-        elif cep:
-            query = f"{cep}, Brazil"
-        else:
-            query = "Brasília, DF, Brazil"
-    else:
-        # Outros estados: Bairro + Cidade + UF
-        partes = []
-        if bairro: partes.append(bairro)
-        if cidade: partes.append(cidade)
-        if uf: partes.append(uf)
-        partes.append("Brazil")
-        query = ", ".join(partes)
+    if not texto: return ""
+    texto = normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII').upper()
+    texto = re.sub(r'[^\w\s,]', '', texto)
+    # Remove complementos comuns que a API não entende
+    padrao_corte = r'\b(SALA|LOJA|LJ|APTO|APT|BLOCO|BL|QD|LT|KM|RODOVIA|ROD|SETOR|Q\.)\b.*'
+    texto = re.sub(padrao_corte, '', texto)
+    texto = re.sub(r'\b(SNR|SN|NUMERO|NR|CASA|TERREO|FRENTE|FUNDOS)\b', '', texto)
+    return texto.strip()
 
-    params = {
-        'q': query,
-        'format': 'json',
-        'limit': 1
-    }
-
-    try:
-        # Nominatim pede 1 segundo de intervalo entre requests para não bloquear
-        time.sleep(1) 
-        response = requests.get(base_url, params=params, headers=headers, timeout=5)
-        data = response.json()
-        
-        if data:
-            return float(data[0]['lat']), float(data[0]['lon'])
-    except Exception as e:
-        print(f"Erro Geo Nominatim: {e}")
-    
-    return None, None
-
-def get_distancia_osrm(lat_origem, lon_origem, lat_dest, lon_dest):
-    """
-    Calcula distância de carro em KM usando OSRM.
-    Formato URL: /route/v1/driving/{lon},{lat};{lon},{lat}
-    """
-    if not lat_dest or not lon_dest:
-        return 0.0
-        
-    # OSRM usa longitude,latitude
-    url = f"http://router.project-osrm.org/route/v1/driving/{lon_origem},{lat_origem};{lon_dest},{lat_dest}?overview=false"
-    
-    try:
-        response = requests.get(url, timeout=5)
-        data = response.json()
-        
-        if data.get('code') == 'Ok':
-            # Distância vem em metros
-            metros = data['routes'][0]['distance']
-            return metros / 1000.0 # Retorna em KM
-    except Exception as e:
-        print(f"Erro Rota OSRM: {e}")
-        
-    return 0.0
+# ==============================================================================
+# EXTRAÇÃO DE PESO
+# ==============================================================================
 
 def extrair_peso_do_nome(nome):
-    """
-    Tenta extrair o peso total em KG baseado no nome do produto.
-    Suporta: '25KG', '10.1KG', '6UN 3KG', '350G/12UN', etc.
-    """
-    nome = nome.upper().replace(',', '.') # Padroniza para maiúsculo e ponto decimal
+    nome = nome.upper().replace(',', '.')
     
-    peso_final = 0.0
+    if "005/09FD" in nome: return 3.62
     
-    # PADRÃO 1: Multiplicação com Barra (Ex: 350G/12UN ou 280G/24UN)
-    # Procura algo como "XXXG / XXUN" ou "XXXG/XXUN"
     match_div = re.search(r'(\d+)\s*G\s*/\s*(\d+)\s*UN', nome)
     if match_div:
         gramas = float(match_div.group(1))
         unidades = float(match_div.group(2))
-        peso_final = (gramas * unidades) / 1000 # Converte g para kg
-        return round(peso_final, 4)
+        return round((gramas * unidades) / 1000, 4)
 
-    # PADRÃO 2: Multiplicação Explícita (Ex: 06UN 3KG ou 6X3KG)
     match_mult_kg = re.search(r'(\d+)\s*(?:UN|CX|PC|X)\s*(\d+(?:\.\d+)?)\s*KG', nome)
     if match_mult_kg:
-        qtd = float(match_mult_kg.group(1))
-        peso_un = float(match_mult_kg.group(2))
-        return round(qtd * peso_un, 4)
+        return round(float(match_mult_kg.group(1)) * float(match_mult_kg.group(2)), 4)
 
-    # PADRÃO 3: Peso Simples em KG (Ex: 25KG, 10.1KG)
-    # Pega o número logo antes de "KG"
     match_kg = re.search(r'(\d+(?:\.\d+)?)\s*KG', nome)
-    if match_kg:
-        return round(float(match_kg.group(1)), 4)
+    if match_kg: return round(float(match_kg.group(1)), 4)
 
-    # PADRÃO 4: Peso Simples em Gramas isolado (Ex: 500G)
-    match_g = re.search(r'(\d+)\s*G(?!\w)', nome) # G no final ou seguido de espaço
-    if match_g:
-        return round(float(match_g.group(1)) / 1000, 4)
+    match_g = re.search(r'(\d+)\s*G(?!\w)', nome)
+    if match_g: return round(float(match_g.group(1)) / 1000, 4)
 
+    return 0.0
+
+# ==============================================================================
+# GEOLOCALIZAÇÃO E ROTAS
+# ==============================================================================
+
+def get_lat_lon(endereco, bairro, cidade, uf, cep):
+    """
+    Busca coordenadas no Nominatim (OpenStreetMap).
+    Lógica Especial para DF incluída.
+    """
+    base_url = "https://nominatim.openstreetmap.org/search"
+    headers = {'User-Agent': 'LeitorFiscalMaster/4.0'}
+    
+    end_clean = limpar_texto_endereco(endereco)
+    cidade_clean = limpar_texto_endereco(cidade)
+    bairro_clean = limpar_texto_endereco(bairro)
+    cep_clean = str(cep).replace('-', '').replace('.', '').strip()
+    uf_upper = str(uf).upper().strip()
+    
+    queries = []
+
+    # --- 1. TENTATIVA VIA CEP (Alta precisão) ---
+    if cep_clean and len(cep_clean) == 8:
+        queries.append(f"{cep_clean}, Brazil")
+
+    # --- 2. REGRA ESPECIAL PARA DF (Distrito Federal) ---
+    if uf_upper == 'DF':
+        # No DF, "Brasília" é vago. Priorizamos o Bairro
+        if bairro_clean:
+            queries.append(f"{bairro_clean}, Brasília, DF, Brazil")
+        if end_clean:
+            queries.append(f"{end_clean}, Brasília, DF, Brazil")
+    else:
+        # --- Lógica Padrão para outros estados ---
+        if end_clean and cidade_clean:
+            queries.append(f"{end_clean}, {cidade_clean}, {uf}, Brazil")
+        
+        if end_clean:
+            rua_sem_num = re.sub(r'\d+$', '', end_clean).strip()
+            if rua_sem_num and len(rua_sem_num) > 3:
+                queries.append(f"{rua_sem_num}, {cidade_clean}, {uf}, Brazil")
+
+    # --- 3. FALLBACKS GERAIS ---
+    if bairro_clean and cidade_clean:
+        queries.append(f"{bairro_clean}, {cidade_clean}, {uf}, Brazil")
+    
+    if cidade_clean:
+        queries.append(f"{cidade_clean}, {uf}, Brazil")
+
+    # Executa a lista de queries
+    for q in queries:
+        if not q.strip(): continue
+        try:
+            time.sleep(1.1) 
+            params = {'q': q, 'format': 'json', 'limit': 1}
+            response = requests.get(base_url, params=params, headers=headers, timeout=4)
+            if response.status_code == 200:
+                data = response.json()
+                if data: 
+                    return float(data[0]['lat']), float(data[0]['lon'])
+        except Exception as e:
+            print(f"⚠️ Erro Query Geo: {e}")
+            continue
+
+    # Se nada funcionar, retorna fixo do estado ou None
+    return COORDS_UF.get(uf, (None, None))
+
+def get_distancia_osrm(lat_origem, lon_origem, lat_dest, lon_dest):
+    """
+    Calcula rota RODOVIÁRIA.
+    Se a API principal falhar, tenta uma API secundária (backup).
+    """
+    if not lat_dest or not lon_dest or not lat_origem or not lon_origem:
+        return 0.0
+    
+    # Lista de servidores OSRM gratuitos (Principal e Backup)
+    endpoints = [
+        "http://router.project-osrm.org/route/v1/driving/",      # Principal
+        "https://routing.openstreetmap.de/routed-car/route/v1/driving/" # Backup
+    ]
+
+    for base_url in endpoints:
+        url = f"{base_url}{lon_origem},{lat_origem};{lon_dest},{lat_dest}?overview=false"
+        try:
+            response = requests.get(url, timeout=4) 
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('code') == 'Ok':
+                    dist_km = data['routes'][0]['distance'] / 1000.0
+                    return round(dist_km, 2)
+        except Exception as e:
+            print(f"⚠️ Falha na rota ({base_url}): {e}")
+            continue
+
+    print("❌ Falha total no cálculo de rota rodoviária.")
     return 0.0

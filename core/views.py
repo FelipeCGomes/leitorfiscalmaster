@@ -1,6 +1,6 @@
 from django.contrib.auth.decorators import login_required
 from django.db import close_old_connections
-from django.shortcuts import render
+from django.shortcuts import render, redirect
 from django.http import StreamingHttpResponse
 from django.template.loader import render_to_string
 from django.contrib import messages
@@ -15,10 +15,21 @@ from datetime import datetime
 import plotly.express as px
 
 # ==============================================================================
+# 0. LIMPEZA DE CACHE
+# ==============================================================================
+def limpar_cache_dashboard():
+    cache.delete('dashboard_df')
+    print(">>> CACHE DO DASHBOARD FOI LIMPO COM SUCESSO! <<<")
+
+# ==============================================================================
 # 1. DASHBOARD
 # ==============================================================================
 @login_required
 def dashboard(request):
+    if request.GET.get('clear_cache'):
+        limpar_cache_dashboard()
+        return redirect('dashboard')
+
     df = services.get_dashboard_data()
     context = {}
     
@@ -106,7 +117,7 @@ def dashboard(request):
         'frete_valor': 'sum', 
         'valor_nf': 'sum', 
         'pedagio_valor': 'sum', 
-        'chave_nf': 'count',
+        'chave_nf': 'count', 
         'distancia_km': 'mean'
     }).reset_index()
 
@@ -200,6 +211,10 @@ def dashboard(request):
 # ==============================================================================
 @login_required
 def analise(request):
+    if request.GET.get('clear_cache'):
+        limpar_cache_dashboard()
+        return redirect('analise')
+        
     df = services.get_dashboard_data()
     context = {}
     
@@ -284,42 +299,43 @@ def analise(request):
     else:
         docs_list = []
 
-    # 6. Drill-down (CORRIGIDO E BLINDADO)
+    # 6. Drill-down (DETALHES DA NF)
     selected_nf = request.GET.get('selected_nf')
     detalhes = {}
+    
     if selected_nf:
-        selected_nf = str(selected_nf).strip()
-        if selected_nf:
-            df_items = services.get_items_por_nf(selected_nf)
-            if not df_items.empty:
-                # Formatação de Valores
-                df_items['vl_total_fmt'] = df_items['vl_total'].apply(lambda x: utils.br_money(float(x)))
-                
-                # --- BLINDAGEM VISUAL: Usa novos campos se existirem, senão usa antigos ---
-                
-                # Qtd Formatada (ex: "5 CX")
-                if 'qtd_formatada' in df_items.columns:
-                    # fillna com qtd_display para garantir que não fique vazio
-                    df_items['qtd_fmt'] = df_items['qtd_formatada'].fillna(df_items.get('qtd_display', ''))
-                else:
-                    df_items['qtd_fmt'] = df_items.get('qtd_display', '')
-
-                # Peso Estimado (ex: "21,00 kg")
-                if 'peso_estimado_total' in df_items.columns:
-                    def fmt_peso(x):
-                        try: return f"{float(x):.2f} kg".replace('.',',')
-                        except: return "-"
-                    df_items['peso_total_fmt'] = df_items['peso_estimado_total'].apply(fmt_peso)
-                else:
-                    df_items['peso_total_fmt'] = "-"
-                
-                detalhes['itens'] = df_items.to_dict('records')
-                try:
-                    detalhes['numero_nf'] = df_items.iloc[0]['numero_nf']
-                except:
-                    detalhes['numero_nf'] = selected_nf
+        selected_nf = str(selected_nf).strip() # Limpeza crucial
+        print(f"Debug View: Buscando NF {selected_nf}")
+        
+        df_items = services.get_items_por_nf(selected_nf)
+        
+        if not df_items.empty:
+            print(f"Debug: Encontrados {len(df_items)} itens.")
+            df_items['vl_total_fmt'] = df_items['vl_total'].apply(lambda x: utils.br_money(float(x)))
+            
+            if 'qtd_formatada' in df_items.columns:
+                df_items['qtd_fmt'] = df_items['qtd_formatada'].fillna(df_items.get('qtd_display', ''))
             else:
-                detalhes['msg'] = "Nenhum item encontrado para esta NF."
+                df_items['qtd_fmt'] = df_items.get('qtd_display', '')
+
+            if 'peso_estimado_total' in df_items.columns:
+                def fmt_peso(x):
+                    try: return f"{float(x):.2f} kg".replace('.',',')
+                    except: return "-"
+                df_items['peso_total_fmt'] = df_items['peso_estimado_total'].apply(fmt_peso)
+            else:
+                df_items['peso_total_fmt'] = "-"
+            
+            detalhes['itens'] = df_items.to_dict('records')
+            try:
+                detalhes['numero_nf'] = df_items.iloc[0]['numero_nf']
+            except:
+                detalhes['numero_nf'] = selected_nf
+        else:
+            print("Debug: Nenhum item encontrado no Banco de Dados.")
+            detalhes['msg'] = f"Nenhum item encontrado para a chave: {selected_nf}. O cache pode estar desatualizado ou a NF foi importada com chave suja. Recomendação: Limpe o Banco e reimporte."
+            # Importante: Definir o numero_nf para o template mostrar o bloco de erro
+            detalhes['numero_nf'] = selected_nf
     
     opts = {
         'ano': sorted(df['Ano'].unique(), reverse=True),
@@ -341,50 +357,37 @@ def analise(request):
     return render(request, 'core/analise.html', context)
 
 # ==============================================================================
-# 3. UPLOAD DE ARQUIVOS (OTIMIZADO)
+# 3. UPLOAD DE ARQUIVOS (OTIMIZADO + LIMPEZA DE CACHE + CÁLCULO DE ROTA)
 # ==============================================================================
 
-# Função que roda em SEGUNDO PLANO (Background)
 def background_geo_worker():
+    """Worker de segundo plano para corrigir clientes antigos se necessário."""
     time.sleep(5)
-    print(">>> Iniciando Worker de Geolocalização em Segundo Plano...")
-    
+    print(">>> Iniciando Worker de Geolocalização (Recuperação)...")
     pendentes = Cliente.objects.filter(latitude__isnull=True)
-    total = pendentes.count()
-    
-    if total == 0:
-        print(">>> Nenhum cliente pendente de geolocalização.")
-        return
-
     for i, cliente in enumerate(pendentes):
         try:
             dados_mock = {
-                'cnpj_dest': cliente.cpf_cnpj,
-                'destinatario': cliente.nome,
-                'cidade_destino': cliente.cidade,
-                'uf_dest': cliente.uf,
-                'endereco': cliente.endereco,
-                'bairro': cliente.bairro,
-                'cep': cliente.cep
+                'cnpj_dest': cliente.cpf_cnpj, 'destinatario': cliente.nome, 'cidade_destino': cliente.cidade,
+                'uf_dest': cliente.uf, 'endereco': cliente.endereco, 'bairro': cliente.bairro, 'cep': cliente.cep
             }
             services.cadastrar_ou_atualizar_cliente(dados_mock, buscar_geo=True)
             time.sleep(1.2)
-            if i % 10 == 0:
-                close_old_connections()
-        except Exception as e:
-            print(f"Erro no Worker Geo ({cliente.nome}): {e}")
-
-    print(">>> Worker de Geolocalização Finalizado!")
+            if i % 10 == 0: close_old_connections()
+        except Exception as e: print(f"Erro Worker: {e}")
+    print(">>> Worker Finalizado!")
 
 @login_required
 def upload_files(request):
     if request.method == 'GET':
+        limpar_cache_dashboard()
         return render(request, 'core/upload.html')
         
     if request.method == 'POST':
         files = request.FILES.getlist('files')
         tipo = request.POST.get('tipo') 
-        
+        limpar_cache_dashboard()
+
         def file_processor_generator():
             yield render_to_string('core/progress.html', request=request)
             
@@ -395,13 +398,17 @@ def upload_files(request):
                         with zipfile.ZipFile(f) as zf:
                             total_docs += len([n for n in zf.namelist() if n.endswith('.xml')])
                     except: total_docs += 1
-                else:
-                    total_docs += 1
+                else: total_docs += 1
             
             processed_count = 0
             BATCH_SIZE = 2000 
-            
             objs_cte = []; objs_nfe = []; objs_item = []; logs = []
+
+            # ==================================================================
+            # CACHE EM MEMÓRIA PARA EVITAR CHAMADAS REPETIDAS NA API DE GEO
+            # ==================================================================
+            emitente_cache = {}     # Key: CNPJ, Value: (lat, lon)
+            destinatario_cache = {} # Key: CNPJ, Value: (lat, lon)
 
             def parse_date(dt_str):
                 try: return datetime.strptime(dt_str, "%d/%m/%Y").date()
@@ -413,7 +420,7 @@ def upload_files(request):
                     if objs_nfe: Nfe.objects.bulk_create(objs_nfe, ignore_conflicts=True); objs_nfe.clear()
                     if objs_item: Item.objects.bulk_create(objs_item, ignore_conflicts=True, batch_size=500); objs_item.clear()
                     if logs: Log.objects.bulk_create(logs, ignore_conflicts=True); logs.clear()
-                    cache.delete('dashboard_df')
+                    limpar_cache_dashboard()
                 except Exception as db_err:
                     print(f"Erro no Batch DB: {db_err}")
                     close_old_connections()
@@ -426,16 +433,22 @@ def upload_files(request):
                             xml_files = [n for n in zf.namelist() if n.endswith('.xml')]
                             for xml_name in xml_files:
                                 content = zf.read(xml_name)
-                                process_content(content, xml_name, tipo, objs_cte, objs_nfe, objs_item, logs, parse_date)
-                                
+                                process_content(
+                                    content, xml_name, tipo, 
+                                    objs_cte, objs_nfe, objs_item, logs, parse_date,
+                                    emitente_cache, destinatario_cache
+                                )
                                 processed_count += 1
                                 percent = int((processed_count / total_docs) * 100) if total_docs > 0 else 0
                                 yield f'<script>updateProgress({processed_count}, {total_docs}, {percent});</script>'
-                                
                                 if len(objs_nfe) >= BATCH_SIZE or len(objs_cte) >= BATCH_SIZE: save_batch()
                     else:
                         content = f.read()
-                        process_content(content, f.name, tipo, objs_cte, objs_nfe, objs_item, logs, parse_date)
+                        process_content(
+                            content, f.name, tipo, 
+                            objs_cte, objs_nfe, objs_item, logs, parse_date,
+                            emitente_cache, destinatario_cache
+                        )
                         processed_count += 1
                         percent = int((processed_count / total_docs) * 100) if total_docs > 0 else 0
                         yield f'<script>updateProgress({processed_count}, {total_docs}, {percent});</script>'
@@ -453,13 +466,13 @@ def upload_files(request):
             geo_thread.start()
             yield '<script>addLog("Iniciando geolocalização em segundo plano...");</script>'
 
-            msg = f"Sucesso! {processed_count} documentos processados. A geolocalização continuará em segundo plano."
+            msg = f"Sucesso! {processed_count} documentos processados."
             messages.success(request, msg)
             yield f"<script>finishProcess('{request.path}', '{msg}');</script>"
 
         return StreamingHttpResponse(file_processor_generator())
 
-def process_content(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, parse_date):
+def process_content(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, parse_date, emit_cache, dest_cache):
     try:
         if tipo == 'cte':
             rows, err = parsers.parse_cte(content, fname)
@@ -478,7 +491,49 @@ def process_content(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, p
             header, err = parsers.parse_nfe_header(content, fname)
             if err: logs.append(Log(arquivo=fname, tipo_doc='NF-e', status='ERRO', mensagem=err))
             else:
-                services.cadastrar_ou_atualizar_cliente(header, buscar_geo=False)
+                # 1. Garante Cadastro do Destinatário (para Dashboard)
+                services.cadastrar_ou_atualizar_cliente(header, buscar_geo=True)
+
+                # ==============================================================
+                # CÁLCULO DE DISTÂNCIA DINÂMICA (REMETENTE -> DESTINATÁRIO)
+                # ==============================================================
+                distancia_km = 0.0
+                cnpj_emit = header['cnpj_emit']
+                cnpj_dest = header['cnpj_dest']
+                
+                # A. Busca Lat/Lon do Emitente (Cache -> API)
+                lat_emit, lon_emit = None, None
+                if cnpj_emit in emit_cache:
+                    lat_emit, lon_emit = emit_cache[cnpj_emit]
+                else:
+                    lat_emit, lon_emit = utils.get_lat_lon(
+                        header.get('endereco_emit'), header.get('bairro_emit'), 
+                        header.get('cidade_origem'), header.get('uf_emit'), header.get('cep_emit')
+                    )
+                    if lat_emit: emit_cache[cnpj_emit] = (lat_emit, lon_emit)
+
+                # B. Busca Lat/Lon do Destinatário (Cache -> DB Cliente -> API)
+                lat_dest, lon_dest = None, None
+                if cnpj_dest in dest_cache:
+                    lat_dest, lon_dest = dest_cache[cnpj_dest]
+                else:
+                    # Tenta pegar do banco primeiro (pois pode já ter sido calculado)
+                    cliente_db = Cliente.objects.filter(cpf_cnpj=cnpj_dest).first()
+                    if cliente_db and cliente_db.latitude:
+                        lat_dest, lon_dest = float(cliente_db.latitude), float(cliente_db.longitude)
+                    else:
+                        # Se não tem, busca na API
+                        lat_dest, lon_dest = utils.get_lat_lon(
+                            header.get('endereco_dest'), header.get('bairro_dest'), 
+                            header.get('cidade_destino'), header.get('uf_dest'), header.get('cep_dest')
+                        )
+                    if lat_dest: dest_cache[cnpj_dest] = (lat_dest, lon_dest)
+
+                # C. Calcula Distância (Se tiver os dois pontos)
+                if lat_emit and lon_emit and lat_dest and lon_dest:
+                    distancia_km = utils.get_distancia_osrm(lat_emit, lon_emit, lat_dest, lon_dest)
+
+                # ==============================================================
 
                 objs_nfe.append(Nfe(
                     chave_nf=header['chave_nf'], data=parse_date(header['data']), numero_nf=header['numero_nf'],
@@ -486,13 +541,17 @@ def process_content(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, p
                     cnpj_dest=header['cnpj_dest'], uf_dest=header['uf_dest'], valor_nf=header['valor_nf'],
                     peso_bruto=header['peso_bruto'], transportadora=header['transportadora'], cidade_origem=header['cidade_origem'],
                     cidade_destino=header['cidade_destino'], mod_frete=header['mod_frete'], cfop_predominante=header['cfop_predominante'],
-                    tipo_operacao=header['tipo_operacao'], qtd_itens=header['qtd_itens'], arquivo=fname
+                    tipo_operacao=header['tipo_operacao'], qtd_itens=header['qtd_itens'], arquivo=fname,
+                    
+                    cep_origem=header.get('cep_emit'),
+                    cep_destino=header.get('cep_dest'),
+                    distancia=distancia_km # CAMPO CALCULADO
                 ))
                 
                 items, _ = parsers.parse_nfe_items(content, fname)
                 
                 for i in items:
-                    peso_unitario_real = services.obter_peso_produto(i['produto'])
+                    peso_unitario_real = float(services.obter_peso_produto(i['produto']))
                     qtd = float(i['qtd_float'])
                     peso_total_item = peso_unitario_real * qtd
                     
@@ -503,13 +562,9 @@ def process_content(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, p
                     objs_item.append(Item(
                         chave_nf=i['chave_nf'], numero_nf=i['numero_nf'], emitente=i['emitente'], item_num=i['item_num'],
                         produto=i['produto'], ncm=i['ncm'], cfop=i['cfop'], unidade=i['unidade'], 
-                        
-                        qtd_display=str_peso_unitario,   # Visual: Peso Unitário
-                        qtd_formatada=str_qtd_comercial, # Visual: Quantidade Comercial
-                        
+                        qtd_display=str_peso_unitario, qtd_formatada=str_qtd_comercial,
                         qtd_float=i['qtd_float'], vl_total=i['vl_total'], 
-                        peso_estimado_total=peso_total_item, 
-                        arquivo=fname
+                        peso_estimado_total=peso_total_item, arquivo=fname
                     ))
     except Exception as e:
         logs.append(Log(arquivo=fname, tipo_doc=tipo, status='ERRO FATAL', mensagem=str(e)))
