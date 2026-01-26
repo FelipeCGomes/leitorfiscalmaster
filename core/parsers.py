@@ -25,7 +25,6 @@ def parse_cte(raw, fname):
             if rt.find(".//retEventoCTe") is not None: return [], "Evento de CT-e"
             return [], "XML Inválido"
         
-        # Safe Get para atributos
         cte_id = inf.get("Id", "")
         chave_cte_propria = cte_id.replace("CTe", "").strip() if cte_id else ""
         
@@ -50,6 +49,14 @@ def parse_cte(raw, fname):
         chaves = [n.findtext("chave") for n in inf.findall(".//infNFe") if n.findtext("chave")]
         if not chaves: chaves = [""]
 
+        # CAPTURA ENDEREÇO DO EMITENTE (TRANSPORTADORA)
+        emit = inf.find("emit")
+        ender_emit = emit.find("enderEmit") if emit is not None else None
+        
+        x_lgr = ender_emit.findtext("xLgr") if ender_emit is not None else ""
+        nro = ender_emit.findtext("nro") if ender_emit is not None else ""
+        end_completo = f"{x_lgr}, {nro}".strip(", ")
+
         lines = []
         for k in chaves:
             k = str(k).strip()
@@ -71,21 +78,25 @@ def parse_cte(raw, fname):
                 "pedagio_valor": pedagio, 
                 "chave_ref_cte": chave_ref,
                 "tp_cte": tp_cte,
-                "arquivo": fname
+                "arquivo": fname,
+                
+                # Dados Extras para Transportadora
+                "emit_endereco": end_completo,
+                "emit_cidade": m_ini,
+                "emit_uf": u_ini,
+                "emit_cep": ender_emit.findtext("CEP") if ender_emit is not None else ""
             })
         return lines, None
     except Exception as e: return [], str(e)
 
 # ==============================================================================
-# PARSER DE NFE - HEADER (BLINDADO CONTRA NoneType)
+# PARSER DE NFE - HEADER (COM CNPJ TRANSPORTADORA)
 # ==============================================================================
 def parse_nfe_header(content, filename):
     try:
         doc = xmltodict.parse(content)
         
-        # Navegação Segura: (dict or {}) garante que nunca seja None
         nfe_proc = doc.get('nfeProc') or {}
-        # Tenta pegar NFe dentro de nfeProc ou direto na raiz
         nfe_node = nfe_proc.get('NFe') or doc.get('NFe') or {}
         inf_nfe = nfe_node.get('infNFe') or {}
 
@@ -100,11 +111,10 @@ def parse_nfe_header(content, filename):
         transporta = transp.get('transporta') or {}
         vol = transp.get('vol') or {}
         
-        # --- Endereço do DESTINATÁRIO (Blindado) ---
+        # Endereços
         ender_dest = dest.get('enderDest') or {}
         endereco_dest_completo = f"{ender_dest.get('xLgr', '')}, {ender_dest.get('nro', '')}"
         
-        # --- Endereço do EMITENTE (Blindado) ---
         ender_emit = emit.get('enderEmit') or {}
         endereco_emit_completo = f"{ender_emit.get('xLgr', '')}, {ender_emit.get('nro', '')}"
         
@@ -115,19 +125,16 @@ def parse_nfe_header(content, filename):
         except: dt_obj = None
 
         det = inf_nfe.get('det') or []
-        # Se for um único item (dict), transforma em lista
-        if isinstance(det, dict):
-            qtd_itens = 1
-        elif isinstance(det, list):
-            qtd_itens = len(det)
-        else:
-            qtd_itens = 0
+        if isinstance(det, dict): qtd_itens = 1
+        elif isinstance(det, list): qtd_itens = len(det)
+        else: qtd_itens = 0
 
         peso_b = 0.0
         if isinstance(vol, list):
             for v in vol: 
-                val = v.get('pesoB') or 0
-                peso_b += float(val)
+                if v and isinstance(v, dict):
+                    val = v.get('pesoB') or 0
+                    peso_b += float(val)
         elif isinstance(vol, dict):
             val = vol.get('pesoB') or 0
             peso_b = float(val)
@@ -144,14 +151,12 @@ def parse_nfe_header(content, filename):
             'destinatario': dest.get('xNome', ''),
             'cnpj_dest': limpar_cnpj(dest.get('CNPJ', '') or dest.get('CPF', '')),
             
-            # Dados Destinatário
             'uf_dest': ender_dest.get('UF', ''),
             'cidade_destino': ender_dest.get('xMun', ''),
             'endereco_dest': endereco_dest_completo,
             'bairro_dest': ender_dest.get('xBairro', ''),
             'cep_dest': ender_dest.get('CEP', ''),
 
-            # Dados Emitente
             'uf_emit': ender_emit.get('UF', ''),
             'cidade_origem': ender_emit.get('xMun', ''),
             'endereco_emit': endereco_emit_completo,
@@ -160,20 +165,27 @@ def parse_nfe_header(content, filename):
 
             'valor_nf': float(total.get('vNF') or 0),
             'peso_bruto': peso_b,
-            'transportadora': transporta.get('xNome', 'Próprio/Outros'),
             'mod_frete': transp.get('modFrete', '9'),
-            'cfop_predominante': '', 'tipo_operacao': ide.get('tpNF', '1'), 'qtd_itens': qtd_itens
+            'cfop_predominante': '', 
+            'tipo_operacao': ide.get('tpNF', '1'), 
+            'qtd_itens': qtd_itens,
+
+            # --- DADOS DA TRANSPORTADORA (NOVOS) ---
+            'transportadora': transporta.get('xNome', 'Próprio/Outros'),
+            'transportadora_cnpj': limpar_cnpj(transporta.get('CNPJ', '')),
+            'transportadora_endereco': transporta.get('xEnder', ''),
+            'transportadora_cidade': transporta.get('xMun', ''),
+            'transportadora_uf': transporta.get('UF', '')
         }
         return header, None
     except Exception as e: return None, f"Erro Header: {str(e)}"
 
 # ==============================================================================
-# PARSER DE NFE - ITENS (BLINDADO)
+# PARSER DE NFE - ITENS (Mantido e Blindado)
 # ==============================================================================
 def parse_nfe_items(content, filename):
     try:
         doc = xmltodict.parse(content)
-        
         nfe_proc = doc.get('nfeProc') or {}
         nfe_node = nfe_proc.get('NFe') or doc.get('NFe') or {}
         inf_nfe = nfe_node.get('infNFe') or {}
@@ -183,7 +195,6 @@ def parse_nfe_items(content, filename):
         
         ide = inf_nfe.get('ide') or {}
         numero_nf = ide.get('nNF', '')
-        
         emit = inf_nfe.get('emit') or {}
         emitente = emit.get('xNome', '')
 
@@ -192,12 +203,10 @@ def parse_nfe_items(content, filename):
 
         items = []
         for i, d in enumerate(dets):
+            if not d: continue
             prod = d.get('prod') or {}
-            item_num = d.get('@nItem')
-            if not item_num: item_num = str(i + 1)
-
-            nome_produto = prod.get('xProd')
-            if not nome_produto: nome_produto = prod.get('cProd', 'PRODUTO SEM NOME')
+            item_num = d.get('@nItem') or str(i + 1)
+            nome_produto = prod.get('xProd') or prod.get('cProd', 'PRODUTO SEM NOME')
 
             items.append({
                 'chave_nf': chave_nf,

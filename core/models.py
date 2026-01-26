@@ -122,3 +122,37 @@ class ProdutoMap(models.Model):
     class Meta:
         verbose_name = "Mapeamento de Produto"
         verbose_name_plural = "Mapeamento de Produtos"
+
+
+class Transportadora(models.Model):
+    TIPO_PERFIL = [
+        ('Simples', 'Simples Nacional'),
+        ('Padrao', 'Padrão (Lucro Real/Presumido)'),
+    ]
+
+    cnpj = models.CharField(max_length=20, primary_key=True, verbose_name="CNPJ/CPF")
+    nome = models.CharField(max_length=255, verbose_name="Nome / Razão Social")
+    endereco = models.CharField(max_length=255, null=True, blank=True)
+    cidade = models.CharField(max_length=100, null=True, blank=True)
+    uf = models.CharField(max_length=2, null=True, blank=True)
+    cep = models.CharField(max_length=10, null=True, blank=True)
+    
+    perfil_tributario = models.CharField(
+        max_length=20, choices=TIPO_PERFIL, default='Padrao', verbose_name="Perfil Tributário"
+    )
+    
+    # Campos de texto livre para facilitar importação/exportação
+    cidades_atendidas = models.TextField(null=True, blank=True, help_text="Separe as cidades por vírgula")
+    tipos_frete = models.CharField(
+        max_length=255, null=True, blank=True, 
+        help_text="Ex: CIF, FOB, RETIRA, SEM FRETE"
+    )
+
+    data_atualizacao = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.nome} ({self.cnpj})"
+
+    class Meta:
+        verbose_name = "Transportadora"
+        verbose_name_plural = "Transportadoras"

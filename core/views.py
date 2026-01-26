@@ -22,7 +22,99 @@ def limpar_cache_dashboard():
     print(">>> CACHE DO DASHBOARD FOI LIMPO COM SUCESSO! <<<")
 
 # ==============================================================================
-# 1. DASHBOARD
+# WORKER DE GEOLOCALIZAÇÃO (RODA EM SEGUNDO PLANO)
+# ==============================================================================
+def background_geo_worker():
+    """
+    Processo que roda 'escondido' para calcular rotas e coordenadas
+    sem travar o navegador do utilizador.
+    """
+    time.sleep(3) # Espera o banco libertar após o commit do upload
+    print(">>> [WORKER] Iniciando processamento de Geolocalização...")
+    
+    # Cache local para não consultar o mesmo CEP/Cidade mil vezes nesta thread
+    cache_origem = {} 
+
+    try:
+        # ----------------------------------------------------------------------
+        # ETAPA 1: ATUALIZAR LAT/LON DOS CLIENTES (DESTINATÁRIOS)
+        # ----------------------------------------------------------------------
+        # Pega lotes de 200 para não sobrecarregar
+        clientes_pendentes = Cliente.objects.filter(latitude__isnull=True)[:200] 
+        print(f">>> [WORKER] Atualizando {len(clientes_pendentes)} clientes pendentes...")
+        
+        for cli in clientes_pendentes:
+            try:
+                lat, lon = utils.get_lat_lon(cli.endereco, cli.bairro, cli.cidade, cli.uf, cli.cep)
+                if lat and lon:
+                    cli.latitude = lat
+                    cli.longitude = lon
+                    cli.save()
+                    print(f"    ✔ Cliente atualizado: {cli.nome}")
+                else:
+                    # Marca com 0 para não tentar de novo imediatamente se falhar
+                    cli.latitude = 0
+                    cli.longitude = 0
+                    cli.save()
+            except Exception as e:
+                print(f"    ❌ Erro cli {cli.cpf_cnpj}: {e}")
+            
+            time.sleep(0.5) # Pausa ética para não bloquear a API
+
+        # ----------------------------------------------------------------------
+        # ETAPA 2: CALCULAR DISTÂNCIA DAS NOTAS (EMITENTE -> DESTINATÁRIO)
+        # ----------------------------------------------------------------------
+        # Pega notas que ainda não têm distância calculada
+        nfes_pendentes = Nfe.objects.filter(distancia=0)[:500]
+        print(f">>> [WORKER] Calculando rotas para {len(nfes_pendentes)} notas...")
+
+        for nf in nfes_pendentes:
+            try:
+                # 1. Origem (Emitente)
+                lat_origem, lon_origem = None, None
+                # Tenta usar o CEP, senão usa Cidade-UF
+                chave_origem = nf.cep_origem if nf.cep_origem else f"{nf.cidade_origem}-{nf.uf_dest}"
+                
+                if chave_origem in cache_origem:
+                    lat_origem, lon_origem = cache_origem[chave_origem]
+                else:
+                    # Busca Geo da Origem (usando CEP ou Cidade do Emitente)
+                    lat_origem, lon_origem = utils.get_lat_lon("", "", nf.cidade_origem, "", nf.cep_origem)
+                    if lat_origem:
+                        cache_origem[chave_origem] = (lat_origem, lon_origem)
+
+                # 2. Destino (Cliente)
+                lat_dest, lon_dest = None, None
+                # Tenta pegar do cliente já salvo no banco (mais rápido e já atualizado na etapa 1)
+                try:
+                    cliente = Cliente.objects.get(cpf_cnpj=nf.cnpj_dest)
+                    if cliente.latitude and cliente.latitude != 0:
+                        lat_dest = float(cliente.latitude)
+                        lon_dest = float(cliente.longitude)
+                except:
+                    pass
+
+                # 3. Calcula Rota (Se tiver os dois pontos)
+                if lat_origem and lon_origem and lat_dest and lon_dest:
+                    dist = utils.get_distancia_osrm(lat_origem, lon_origem, lat_dest, lon_dest)
+                    if dist > 0:
+                        nf.distancia = dist
+                        nf.save(update_fields=['distancia'])
+                        print(f"    ✔ Rota calculada NF {nf.numero_nf}: {dist} km")
+                
+            except Exception as e:
+                print(f"    ❌ Erro rota NF {nf.numero_nf}: {e}")
+
+        # Fecha conexões para evitar "MySQL server has gone away" se o worker demorar
+        close_old_connections()
+        
+    except Exception as e:
+        print(f">>> [WORKER] Erro geral: {e}")
+
+    print(">>> [WORKER] Ciclo finalizado.")
+
+# ==============================================================================
+# 1. DASHBOARD COMPLETO
 # ==============================================================================
 @login_required
 def dashboard(request):
@@ -207,7 +299,7 @@ def dashboard(request):
     return render(request, 'core/dashboard.html', context)
 
 # ==============================================================================
-# 2. ANÁLISE DETALHADA
+# 2. ANÁLISE DETALHADA COMPLETA
 # ==============================================================================
 @login_required
 def analise(request):
@@ -357,26 +449,8 @@ def analise(request):
     return render(request, 'core/analise.html', context)
 
 # ==============================================================================
-# 3. UPLOAD DE ARQUIVOS (OTIMIZADO + LIMPEZA DE CACHE + CÁLCULO DE ROTA)
+# 3. UPLOAD DE ARQUIVOS (OTIMIZADO - SALVA PRIMEIRO, GEO DEPOIS)
 # ==============================================================================
-
-def background_geo_worker():
-    """Worker de segundo plano para corrigir clientes antigos se necessário."""
-    time.sleep(5)
-    print(">>> Iniciando Worker de Geolocalização (Recuperação)...")
-    pendentes = Cliente.objects.filter(latitude__isnull=True)
-    for i, cliente in enumerate(pendentes):
-        try:
-            dados_mock = {
-                'cnpj_dest': cliente.cpf_cnpj, 'destinatario': cliente.nome, 'cidade_destino': cliente.cidade,
-                'uf_dest': cliente.uf, 'endereco': cliente.endereco, 'bairro': cliente.bairro, 'cep': cliente.cep
-            }
-            services.cadastrar_ou_atualizar_cliente(dados_mock, buscar_geo=True)
-            time.sleep(1.2)
-            if i % 10 == 0: close_old_connections()
-        except Exception as e: print(f"Erro Worker: {e}")
-    print(">>> Worker Finalizado!")
-
 @login_required
 def upload_files(request):
     if request.method == 'GET':
@@ -401,14 +475,8 @@ def upload_files(request):
                 else: total_docs += 1
             
             processed_count = 0
-            BATCH_SIZE = 2000 
+            BATCH_SIZE = 1000 
             objs_cte = []; objs_nfe = []; objs_item = []; logs = []
-
-            # ==================================================================
-            # CACHE EM MEMÓRIA PARA EVITAR CHAMADAS REPETIDAS NA API DE GEO
-            # ==================================================================
-            emitente_cache = {}     # Key: CNPJ, Value: (lat, lon)
-            destinatario_cache = {} # Key: CNPJ, Value: (lat, lon)
 
             def parse_date(dt_str):
                 try: return datetime.strptime(dt_str, "%d/%m/%Y").date()
@@ -420,7 +488,6 @@ def upload_files(request):
                     if objs_nfe: Nfe.objects.bulk_create(objs_nfe, ignore_conflicts=True); objs_nfe.clear()
                     if objs_item: Item.objects.bulk_create(objs_item, ignore_conflicts=True, batch_size=500); objs_item.clear()
                     if logs: Log.objects.bulk_create(logs, ignore_conflicts=True); logs.clear()
-                    limpar_cache_dashboard()
                 except Exception as db_err:
                     print(f"Erro no Batch DB: {db_err}")
                     close_old_connections()
@@ -433,10 +500,10 @@ def upload_files(request):
                             xml_files = [n for n in zf.namelist() if n.endswith('.xml')]
                             for xml_name in xml_files:
                                 content = zf.read(xml_name)
-                                process_content(
+                                # CHAMA PROCESSADOR LEVE (SEM GEO API)
+                                process_content_light(
                                     content, xml_name, tipo, 
-                                    objs_cte, objs_nfe, objs_item, logs, parse_date,
-                                    emitente_cache, destinatario_cache
+                                    objs_cte, objs_nfe, objs_item, logs, parse_date
                                 )
                                 processed_count += 1
                                 percent = int((processed_count / total_docs) * 100) if total_docs > 0 else 0
@@ -444,10 +511,9 @@ def upload_files(request):
                                 if len(objs_nfe) >= BATCH_SIZE or len(objs_cte) >= BATCH_SIZE: save_batch()
                     else:
                         content = f.read()
-                        process_content(
+                        process_content_light(
                             content, f.name, tipo, 
-                            objs_cte, objs_nfe, objs_item, logs, parse_date,
-                            emitente_cache, destinatario_cache
+                            objs_cte, objs_nfe, objs_item, logs, parse_date
                         )
                         processed_count += 1
                         percent = int((processed_count / total_docs) * 100) if total_docs > 0 else 0
@@ -458,21 +524,23 @@ def upload_files(request):
                     logs.append(Log(arquivo=f.name, tipo_doc=tipo, status='ERRO', mensagem=str(e)))
                     yield f'<script>addLog("Erro em {f.name}: {str(e)}");</script>'
 
-            yield '<script>addLog("Gravando dados finais...");</script>'
+            yield '<script>addLog("Salvando dados no banco...");</script>'
             save_batch()
             
+            # INICIA O WORKER DE GEO EM PARALELO
             geo_thread = threading.Thread(target=background_geo_worker)
             geo_thread.daemon = True 
             geo_thread.start()
-            yield '<script>addLog("Iniciando geolocalização em segundo plano...");</script>'
+            yield '<script>addLog("Upload concluído! Geolocalização iniciada em segundo plano.");</script>'
 
-            msg = f"Sucesso! {processed_count} documentos processados."
+            msg = f"Sucesso! {processed_count} documentos salvos. O cálculo de rotas continuará rodando."
             messages.success(request, msg)
             yield f"<script>finishProcess('{request.path}', '{msg}');</script>"
 
         return StreamingHttpResponse(file_processor_generator())
 
-def process_content(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, parse_date, emit_cache, dest_cache):
+# FUNÇÃO LEVE - SÓ PARSEIA E SALVA (ZERO API EXTERNA)
+def process_content_light(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, parse_date):
     try:
         if tipo == 'cte':
             rows, err = parsers.parse_cte(content, fname)
@@ -491,49 +559,8 @@ def process_content(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, p
             header, err = parsers.parse_nfe_header(content, fname)
             if err: logs.append(Log(arquivo=fname, tipo_doc='NF-e', status='ERRO', mensagem=err))
             else:
-                # 1. Garante Cadastro do Destinatário (para Dashboard)
-                services.cadastrar_ou_atualizar_cliente(header, buscar_geo=True)
-
-                # ==============================================================
-                # CÁLCULO DE DISTÂNCIA DINÂMICA (REMETENTE -> DESTINATÁRIO)
-                # ==============================================================
-                distancia_km = 0.0
-                cnpj_emit = header['cnpj_emit']
-                cnpj_dest = header['cnpj_dest']
-                
-                # A. Busca Lat/Lon do Emitente (Cache -> API)
-                lat_emit, lon_emit = None, None
-                if cnpj_emit in emit_cache:
-                    lat_emit, lon_emit = emit_cache[cnpj_emit]
-                else:
-                    lat_emit, lon_emit = utils.get_lat_lon(
-                        header.get('endereco_emit'), header.get('bairro_emit'), 
-                        header.get('cidade_origem'), header.get('uf_emit'), header.get('cep_emit')
-                    )
-                    if lat_emit: emit_cache[cnpj_emit] = (lat_emit, lon_emit)
-
-                # B. Busca Lat/Lon do Destinatário (Cache -> DB Cliente -> API)
-                lat_dest, lon_dest = None, None
-                if cnpj_dest in dest_cache:
-                    lat_dest, lon_dest = dest_cache[cnpj_dest]
-                else:
-                    # Tenta pegar do banco primeiro (pois pode já ter sido calculado)
-                    cliente_db = Cliente.objects.filter(cpf_cnpj=cnpj_dest).first()
-                    if cliente_db and cliente_db.latitude:
-                        lat_dest, lon_dest = float(cliente_db.latitude), float(cliente_db.longitude)
-                    else:
-                        # Se não tem, busca na API
-                        lat_dest, lon_dest = utils.get_lat_lon(
-                            header.get('endereco_dest'), header.get('bairro_dest'), 
-                            header.get('cidade_destino'), header.get('uf_dest'), header.get('cep_dest')
-                        )
-                    if lat_dest: dest_cache[cnpj_dest] = (lat_dest, lon_dest)
-
-                # C. Calcula Distância (Se tiver os dois pontos)
-                if lat_emit and lon_emit and lat_dest and lon_dest:
-                    distancia_km = utils.get_distancia_osrm(lat_emit, lon_emit, lat_dest, lon_dest)
-
-                # ==============================================================
+                # Salva cliente APENAS com dados do XML (Geo = False)
+                services.cadastrar_ou_atualizar_cliente(header, buscar_geo=False)
 
                 objs_nfe.append(Nfe(
                     chave_nf=header['chave_nf'], data=parse_date(header['data']), numero_nf=header['numero_nf'],
@@ -545,11 +572,71 @@ def process_content(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, p
                     
                     cep_origem=header.get('cep_emit'),
                     cep_destino=header.get('cep_dest'),
-                    distancia=distancia_km # CAMPO CALCULADO
+                    distancia=0 # ZERA A DISTÂNCIA (O Worker calcula depois)
                 ))
                 
                 items, _ = parsers.parse_nfe_items(content, fname)
                 
+                for i in items:
+                    peso_unitario_real = float(services.obter_peso_produto(i['produto']))
+                    qtd = float(i['qtd_float'])
+                    peso_total_item = peso_unitario_real * qtd
+                    
+                    str_peso_unitario = utils.br_weight(peso_unitario_real)
+                    qtd_fmt_num = f"{int(qtd)}" if qtd.is_integer() else f"{qtd:g}".replace('.', ',')
+                    str_qtd_comercial = f"{qtd_fmt_num} {i['unidade']}"
+
+                    objs_item.append(Item(
+                        chave_nf=i['chave_nf'], numero_nf=i['numero_nf'], emitente=i['emitente'], item_num=i['item_num'],
+                        produto=i['produto'], ncm=i['ncm'], cfop=i['cfop'], unidade=i['unidade'], 
+                        qtd_display=str_peso_unitario, qtd_formatada=str_qtd_comercial,
+                        qtd_float=i['qtd_float'], vl_total=i['vl_total'], 
+                        peso_estimado_total=peso_total_item, arquivo=fname
+                    ))
+    except Exception as e:
+        logs.append(Log(arquivo=fname, tipo_doc=tipo, status='ERRO FATAL', mensagem=str(e)))
+
+# FUNÇÃO LEVE - SÓ PARSEIA E SALVA (ZERO API EXTERNA)
+def process_content_light(content, fname, tipo, objs_cte, objs_nfe, objs_item, logs, parse_date):
+    try:
+        if tipo == 'cte':
+            rows, err = parsers.parse_cte(content, fname)
+            if err: logs.append(Log(arquivo=fname, tipo_doc='CT-e', status='ERRO', mensagem=err))
+            else:
+                for r in rows:
+                    # 1. Cadastra Transportadora (Emitente do CTe)
+                    services.cadastrar_transportadora_xml(r, 'cte')
+                    
+                    objs_cte.append(Cte(
+                        chave_cte_propria=r['chave_cte_propria'], chave_nf=r['chave_nf'], data=parse_date(r['data']),
+                        numero_cte=r['numero_cte'], emitente=r['emitente'], cnpj_emit=r['cnpj_emit'],
+                        remetente=r['remetente'], destinatario=r['destinatario'], frete_valor=r['frete_valor'],
+                        peso_kg=r['peso_kg'], numero_nf_cte=r['numero_nf_cte'], cidade_origem=r['cidade_origem'],
+                        cidade_destino=r['cidade_destino'], pedagio_valor=r['pedagio_valor'], tp_cte=r['tp_cte'], arquivo=fname
+                    ))
+
+        elif tipo == 'nfe':
+            header, err = parsers.parse_nfe_header(content, fname)
+            if err: logs.append(Log(arquivo=fname, tipo_doc='NF-e', status='ERRO', mensagem=err))
+            else:
+                # 2. Cadastra Cliente e Transportadora
+                services.cadastrar_ou_atualizar_cliente(header, buscar_geo=False)
+                services.cadastrar_transportadora_xml(header, 'nfe')
+
+                objs_nfe.append(Nfe(
+                    chave_nf=header['chave_nf'], data=parse_date(header['data']), numero_nf=header['numero_nf'],
+                    emitente=header['emitente'], destinatario=header['destinatario'], cnpj_emit=header['cnpj_emit'],
+                    cnpj_dest=header['cnpj_dest'], uf_dest=header['uf_dest'], valor_nf=header['valor_nf'],
+                    peso_bruto=header['peso_bruto'], transportadora=header['transportadora'], cidade_origem=header['cidade_origem'],
+                    cidade_destino=header['cidade_destino'], mod_frete=header['mod_frete'], cfop_predominante=header['cfop_predominante'],
+                    tipo_operacao=header['tipo_operacao'], qtd_itens=header['qtd_itens'], arquivo=fname,
+                    
+                    cep_origem=header.get('cep_emit'),
+                    cep_destino=header.get('cep_dest'),
+                    distancia=0 
+                ))
+                
+                items, _ = parsers.parse_nfe_items(content, fname)
                 for i in items:
                     peso_unitario_real = float(services.obter_peso_produto(i['produto']))
                     qtd = float(i['qtd_float'])

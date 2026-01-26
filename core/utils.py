@@ -59,13 +59,9 @@ def br_num(v):
     return f"{v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 def limpar_texto_endereco(texto):
-    """
-    Remove complementos e sujeira que confundem a API de Geolocalização.
-    """
     if not texto: return ""
     texto = normalize('NFKD', texto).encode('ASCII', 'ignore').decode('ASCII').upper()
     texto = re.sub(r'[^\w\s,]', '', texto)
-    # Remove complementos comuns que a API não entende
     padrao_corte = r'\b(SALA|LOJA|LJ|APTO|APT|BLOCO|BL|QD|LT|KM|RODOVIA|ROD|SETOR|Q\.)\b.*'
     texto = re.sub(padrao_corte, '', texto)
     texto = re.sub(r'\b(SNR|SN|NUMERO|NR|CASA|TERREO|FRENTE|FUNDOS)\b', '', texto)
@@ -77,25 +73,19 @@ def limpar_texto_endereco(texto):
 
 def extrair_peso_do_nome(nome):
     nome = nome.upper().replace(',', '.')
-    
     if "005/09FD" in nome: return 3.62
-    
     match_div = re.search(r'(\d+)\s*G\s*/\s*(\d+)\s*UN', nome)
     if match_div:
         gramas = float(match_div.group(1))
         unidades = float(match_div.group(2))
         return round((gramas * unidades) / 1000, 4)
-
     match_mult_kg = re.search(r'(\d+)\s*(?:UN|CX|PC|X)\s*(\d+(?:\.\d+)?)\s*KG', nome)
     if match_mult_kg:
         return round(float(match_mult_kg.group(1)) * float(match_mult_kg.group(2)), 4)
-
     match_kg = re.search(r'(\d+(?:\.\d+)?)\s*KG', nome)
     if match_kg: return round(float(match_kg.group(1)), 4)
-
     match_g = re.search(r'(\d+)\s*G(?!\w)', nome)
     if match_g: return round(float(match_g.group(1)) / 1000, 4)
-
     return 0.0
 
 # ==============================================================================
@@ -103,10 +93,6 @@ def extrair_peso_do_nome(nome):
 # ==============================================================================
 
 def get_lat_lon(endereco, bairro, cidade, uf, cep):
-    """
-    Busca coordenadas no Nominatim (OpenStreetMap).
-    Lógica Especial para DF incluída.
-    """
     base_url = "https://nominatim.openstreetmap.org/search"
     headers = {'User-Agent': 'LeitorFiscalMaster/4.0'}
     
@@ -117,36 +103,21 @@ def get_lat_lon(endereco, bairro, cidade, uf, cep):
     uf_upper = str(uf).upper().strip()
     
     queries = []
+    if cep_clean and len(cep_clean) == 8: queries.append(f"{cep_clean}, Brazil")
 
-    # --- 1. TENTATIVA VIA CEP (Alta precisão) ---
-    if cep_clean and len(cep_clean) == 8:
-        queries.append(f"{cep_clean}, Brazil")
-
-    # --- 2. REGRA ESPECIAL PARA DF (Distrito Federal) ---
     if uf_upper == 'DF':
-        # No DF, "Brasília" é vago. Priorizamos o Bairro
-        if bairro_clean:
-            queries.append(f"{bairro_clean}, Brasília, DF, Brazil")
-        if end_clean:
-            queries.append(f"{end_clean}, Brasília, DF, Brazil")
+        if bairro_clean: queries.append(f"{bairro_clean}, Brasília, DF, Brazil")
+        if end_clean: queries.append(f"{end_clean}, Brasília, DF, Brazil")
     else:
-        # --- Lógica Padrão para outros estados ---
-        if end_clean and cidade_clean:
-            queries.append(f"{end_clean}, {cidade_clean}, {uf}, Brazil")
-        
+        if end_clean and cidade_clean: queries.append(f"{end_clean}, {cidade_clean}, {uf}, Brazil")
         if end_clean:
             rua_sem_num = re.sub(r'\d+$', '', end_clean).strip()
             if rua_sem_num and len(rua_sem_num) > 3:
                 queries.append(f"{rua_sem_num}, {cidade_clean}, {uf}, Brazil")
 
-    # --- 3. FALLBACKS GERAIS ---
-    if bairro_clean and cidade_clean:
-        queries.append(f"{bairro_clean}, {cidade_clean}, {uf}, Brazil")
-    
-    if cidade_clean:
-        queries.append(f"{cidade_clean}, {uf}, Brazil")
+    if bairro_clean and cidade_clean: queries.append(f"{bairro_clean}, {cidade_clean}, {uf}, Brazil")
+    if cidade_clean: queries.append(f"{cidade_clean}, {uf}, Brazil")
 
-    # Executa a lista de queries
     for q in queries:
         if not q.strip(): continue
         try:
@@ -155,27 +126,22 @@ def get_lat_lon(endereco, bairro, cidade, uf, cep):
             response = requests.get(base_url, params=params, headers=headers, timeout=4)
             if response.status_code == 200:
                 data = response.json()
-                if data: 
-                    return float(data[0]['lat']), float(data[0]['lon'])
+                # CORREÇÃO: Verifica se data[0] existe E se é um dicionário
+                if data and isinstance(data, list) and isinstance(data[0], dict): 
+                    return float(data[0].get('lat', 0)), float(data[0].get('lon', 0))
         except Exception as e:
             print(f"⚠️ Erro Query Geo: {e}")
             continue
 
-    # Se nada funcionar, retorna fixo do estado ou None
     return COORDS_UF.get(uf, (None, None))
 
 def get_distancia_osrm(lat_origem, lon_origem, lat_dest, lon_dest):
-    """
-    Calcula rota RODOVIÁRIA.
-    Se a API principal falhar, tenta uma API secundária (backup).
-    """
     if not lat_dest or not lon_dest or not lat_origem or not lon_origem:
         return 0.0
     
-    # Lista de servidores OSRM gratuitos (Principal e Backup)
     endpoints = [
-        "http://router.project-osrm.org/route/v1/driving/",      # Principal
-        "https://routing.openstreetmap.de/routed-car/route/v1/driving/" # Backup
+        "http://router.project-osrm.org/route/v1/driving/",
+        "https://routing.openstreetmap.de/routed-car/route/v1/driving/"
     ]
 
     for base_url in endpoints:
@@ -184,7 +150,8 @@ def get_distancia_osrm(lat_origem, lon_origem, lat_dest, lon_dest):
             response = requests.get(url, timeout=4) 
             if response.status_code == 200:
                 data = response.json()
-                if data.get('code') == 'Ok':
+                # CORREÇÃO: Garante que 'routes' exista
+                if data.get('code') == 'Ok' and data.get('routes') and len(data['routes']) > 0:
                     dist_km = data['routes'][0]['distance'] / 1000.0
                     return round(dist_km, 2)
         except Exception as e:

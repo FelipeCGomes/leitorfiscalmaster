@@ -1,17 +1,17 @@
 import pandas as pd
 from django.core.cache import cache
-from .models import Nfe, Cte, Item, MemoriaIa, Cliente, ProdutoMap
+from .models import Nfe, Cte, Item, MemoriaIa, Cliente, ProdutoMap, Transportadora
 from .config import CNPJS_CIA, TABELA_ANTT
 from .utils import limpar_cnpj, get_regiao, COORDS_UF
 from .utils import extrair_peso_do_nome
 
+# ... (MANTENHA get_items_por_nf e obter_peso_produto COMO ESTAVAM) ...
+
 def get_items_por_nf(chave_nf):
-    # CORREÇÃO: Garante que estamos buscando pela chave limpa
     chave_limpa = str(chave_nf).strip()
     qs = Item.objects.filter(chave_nf=chave_limpa).values()
     return pd.DataFrame(qs)
 
-# ... (MANTENHA O RESTANTE DO ARQUIVO SERVICES.PY IGUAL AO QUE VOCÊ TEM) ...
 def obter_peso_produto(nome_produto_xml):
     nome_limpo = str(nome_produto_xml).strip()[:255]
     produto_map = ProdutoMap.objects.filter(nome_produto=nome_limpo).first()
@@ -23,31 +23,89 @@ def obter_peso_produto(nome_produto_xml):
     )
     return peso_calculado
 
+# --- NOVA FUNÇÃO QUE USA OS DADOS JÁ LIDOS ---
+def cadastrar_transportadora_xml(dados, tipo_doc):
+    try:
+        cnpj = None
+        nome = None
+        endereco = None
+        cidade = None
+        uf = None
+        cep = None
+
+        # Estratégia: Pegar dados do dicionário gerado pelo Parser
+        if tipo_doc == 'nfe':
+            cnpj = dados.get('transportadora_cnpj')
+            nome = dados.get('transportadora')
+            cidade = dados.get('transportadora_cidade')
+            uf = dados.get('transportadora_uf')
+            endereco = dados.get('transportadora_endereco')
+            # NFe raramente tem CEP da transportadora no grupo <transporta>
+
+        elif tipo_doc == 'cte':
+            # No CTe, o EMITENTE é a Transportadora
+            cnpj = dados.get('cnpj_emit')
+            nome = dados.get('emitente')
+            endereco = dados.get('emit_endereco') # Parser atualizado pegou isso
+            cidade = dados.get('emit_cidade')
+            uf = dados.get('emit_uf')
+            cep = dados.get('emit_cep')
+
+        # Só cadastra se tiver CNPJ válido
+        if cnpj and len(cnpj) > 10:
+            defaults = {
+                'nome': nome or 'Transportadora',
+                'endereco': endereco,
+                'cidade': cidade,
+                'uf': uf,
+                'cep': cep
+            }
+            # Remove chaves com valores None para não apagar dados existentes com vazio
+            defaults = {k: v for k, v in defaults.items() if v}
+
+            obj, created = Transportadora.objects.get_or_create(
+                cnpj=cnpj,
+                defaults=defaults
+            )
+
+            # Se já existia, atualiza apenas campos vazios (enriquecimento)
+            if not created:
+                mudou = False
+                if not obj.cidade and cidade: obj.cidade = cidade; mudou = True
+                if not obj.uf and uf: obj.uf = uf; mudou = True
+                if not obj.endereco and endereco: obj.endereco = endereco; mudou = True
+                if not obj.cep and cep: obj.cep = cep; mudou = True
+                if mudou: obj.save()
+
+    except Exception as e:
+        print(f"Erro ao salvar transportadora ({tipo_doc}): {e}")
+
+# ... (MANTENHA AS OUTRAS FUNÇÕES: cadastrar_ou_atualizar_cliente e get_dashboard_data) ...
 def cadastrar_ou_atualizar_cliente(dados_header, buscar_geo=True):
     from .utils import get_lat_lon, get_distancia_osrm, ORIGEM_PADRAO
+    if not dados_header: return
     cnpj = dados_header.get('cnpj_dest')
     if not cnpj: return
 
+    nome = (dados_header.get('destinatario') or '')[:255]
+    cidade = (dados_header.get('cidade_destino') or '')[:100]
+    uf = (dados_header.get('uf_dest') or '')[:2]
+    endereco = (dados_header.get('endereco_dest') or dados_header.get('endereco') or '')[:255]
+    bairro = (dados_header.get('bairro_dest') or dados_header.get('bairro') or '')[:100]
+    cep = (dados_header.get('cep_dest') or dados_header.get('cep') or '')[:10]
+
     cliente, created = Cliente.objects.get_or_create(
         cpf_cnpj=cnpj,
-        defaults={
-            'nome': dados_header.get('destinatario')[:255],
-            'razao_social': dados_header.get('destinatario')[:255],
-            'cidade': dados_header.get('cidade_destino')[:100],
-            'uf': dados_header.get('uf_dest')[:2],
-            'endereco': dados_header.get('endereco')[:255],
-            'bairro': dados_header.get('bairro')[:100],
-            'cep': dados_header.get('cep')[:10]
-        }
+        defaults={'nome': nome, 'razao_social': nome, 'cidade': cidade, 'uf': uf, 'endereco': endereco, 'bairro': bairro, 'cep': cep}
     )
     if not created:
         mudou = False
-        if not cliente.bairro and dados_header.get('bairro'): cliente.bairro = dados_header.get('bairro'); mudou = True
-        if not cliente.cep and dados_header.get('cep'): cliente.cep = dados_header.get('cep'); mudou = True
+        if not cliente.bairro and bairro: cliente.bairro = bairro; mudou = True
+        if not cliente.cep and cep: cliente.cep = cep; mudou = True
+        if not cliente.endereco and endereco: cliente.endereco = endereco; mudou = True
         if mudou: cliente.save()
 
     if not buscar_geo or (cliente.latitude and cliente.longitude): return
-    print(f"Buscando Geo para: {cliente.nome}...")
     lat, lon = get_lat_lon(cliente.endereco, cliente.bairro, cliente.cidade, cliente.uf, cliente.cep)
     if lat and lon:
         cliente.latitude = lat
@@ -78,7 +136,6 @@ def get_dashboard_data():
     df_n['valor_nf'] = pd.to_numeric(df_n['valor_nf'], errors='coerce').fillna(0)
     df_n['peso_bruto'] = pd.to_numeric(df_n['peso_bruto'], errors='coerce').fillna(0)
     
-    # IMPORTANTE: MANTENHA O STRIP AQUI
     df_n['chave_nf'] = df_n['chave_nf'].astype(str).str.strip()
     df_n['cnpj_emit'] = df_n['cnpj_emit'].astype(str).str.strip()
     df_n['cnpj_dest'] = df_n['cnpj_dest'].astype(str).str.strip()
@@ -191,3 +248,9 @@ def get_dashboard_data():
     
     cache.set('dashboard_df', df, 3600)
     return df
+
+def render_dashboard_logic(request, df):
+    # Apenas para manter o código compilável se você usar em views.py
+    pass
+def render_analise_logic(request, df):
+    pass
