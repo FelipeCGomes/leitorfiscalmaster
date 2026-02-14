@@ -31,7 +31,7 @@ D. Rodar o Sistema
 PowerShell
 python manage.py runserver
 Verificação Final
-Acesse http://127.0.0.1:8000/admin.
+Acesse http://127.0.0.1:8000.
 
 Logue com o usuário e senha que criou.
 
